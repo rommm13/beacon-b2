@@ -5,7 +5,7 @@ compatibility_flags = ["nodejs_compat"]
 
 [vars]
 ALLOWED_ORIGIN = "https://beacon-b2-dashboard.pages.dev"
-WORKER_URL = "https://beacon-b2-api.<your-subdomain>.workers.dev"
+WORKER_URL = "https://beacon-b2-api.iddqd777.workers.dev"
 PAGES_PREVIEW_SUFFIX = ".beacon-b2-dashboard.pages.dev"
 # B2 (S3-compatible) storage — fill with real values before deploy; no secrets in this file.
 B2_ENDPOINT = "https://s3.<region>.backblazeb2.com"
@@ -19,6 +19,7 @@ B2_BUCKET_SESSION_FILES = "beacon-b2-session-files-placeholder"
 binding = "DB"
 database_name = "beacon-pilot"
 database_id = "aa33fd74-e80a-4dba-8cb3-9a3e54621a39"
+migrations_dir = "../migrations"
 
 [[durable_objects.bindings]]
 name = "SESSION"
@@ -26,7 +27,7 @@ class_name = "SessionRelay"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["SessionRelay"]
+new_sqlite_classes = ["SessionRelay"]
 
 [triggers]
 crons = ["*/2 * * * *"]
