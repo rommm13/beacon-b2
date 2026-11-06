@@ -21,11 +21,14 @@ WORKER_URL = "https://your-api-domain.example.com"
 # Backblaze B2 (S3-compatible) object storage. R2 bucket bindings are NOT
 # required; configure B2 vars below and set secrets via `wrangler secret put`.
 # Keep bucket names/endpoint/region non-secret in vars; application keys are secrets.
-B2_ENDPOINT = "https://s3.us-west-004.backblazeb2.com"
-B2_REGION = "us-west-004"
-B2_BUCKET_LOGOS = "beacon-logos"
-B2_BUCKET_COMPONENT_FILES = "beacon-component-files"
-B2_BUCKET_SESSION_FILES = "beacon-session-files"
+# Single-bucket layout: one private bucket, key prefixes branding/, components/,
+# rustdesk-installer/, sessions/ (see worker/src/index.ts resolvers).
+B2_ENDPOINT = "https://s3.eu-central-003.backblazeb2.com"
+B2_REGION = "eu-central-003"
+B2_BUCKET = "rommm13-beacon-storage"
+B2_BUCKET_LOGOS = "rommm13-beacon-storage"
+B2_BUCKET_COMPONENT_FILES = "rommm13-beacon-storage"
+B2_BUCKET_SESSION_FILES = "rommm13-beacon-storage"
 B2_PRESIGN_EXPIRES_SECONDS = "900"
 
 # Optional hosted-scheduler secret. Keep it as a Worker secret, never a var:

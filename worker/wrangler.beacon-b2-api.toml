@@ -7,13 +7,14 @@ compatibility_flags = ["nodejs_compat"]
 ALLOWED_ORIGIN = "https://beacon-b2-dashboard.pages.dev"
 WORKER_URL = "https://beacon-b2-api.iddqd777.workers.dev"
 PAGES_PREVIEW_SUFFIX = ".beacon-b2-dashboard.pages.dev"
-# B2 (S3-compatible) storage — fill with real values before deploy; no secrets in this file.
-B2_ENDPOINT = "https://s3.<region>.backblazeb2.com"
-B2_REGION = "us-west-004"
-B2_BUCKET = "beacon-b2-placeholder"
-B2_BUCKET_LOGOS = "beacon-b2-logos-placeholder"
-B2_BUCKET_COMPONENT_FILES = "beacon-b2-components-placeholder"
-B2_BUCKET_SESSION_FILES = "beacon-b2-session-files-placeholder"
+# B2 (S3-compatible) storage — single private EU bucket with key prefixes:
+# branding/ (logos), components/ + rustdesk-installer/ (component files), sessions/ (transfers).
+B2_ENDPOINT = "https://s3.eu-central-003.backblazeb2.com"
+B2_REGION = "eu-central-003"
+B2_BUCKET = "rommm13-beacon-storage"
+B2_BUCKET_LOGOS = "rommm13-beacon-storage"
+B2_BUCKET_COMPONENT_FILES = "rommm13-beacon-storage"
+B2_BUCKET_SESSION_FILES = "rommm13-beacon-storage"
 
 [[d1_databases]]
 binding = "DB"

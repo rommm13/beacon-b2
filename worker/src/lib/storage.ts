@@ -90,11 +90,11 @@ export async function getPresignedUrl(
 
 /** Create a B2-backed adapter from env bindings. */
 export function createB2Storage(env: Partial<B2Env>): B2Storage {
-  const { B2_KEY_ID, B2_APPLICATION_KEY, B2_BUCKET, B2_ENDPOINT } = env;
+  const { B2_KEY_ID, B2_APPLICATION_KEY, B2_BUCKET, B2_ENDPOINT, B2_REGION, B2_PREFIX } = env;
   if (!B2_KEY_ID || !B2_APPLICATION_KEY || !B2_BUCKET || !B2_ENDPOINT) {
     throw new Error('B2 storage requires env: B2_KEY_ID, B2_APPLICATION_KEY, B2_BUCKET, B2_ENDPOINT');
   }
-  return new B2Storage({ B2_KEY_ID, B2_APPLICATION_KEY, B2_BUCKET, B2_ENDPOINT });
+  return new B2Storage({ B2_KEY_ID, B2_APPLICATION_KEY, B2_BUCKET, B2_ENDPOINT, B2_REGION, B2_PREFIX });
 }
 
 /**

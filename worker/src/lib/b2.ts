@@ -17,6 +17,11 @@ export interface B2Env {
   B2_ENDPOINT: string;
   /** Optional SigV4 region override (e.g. "us-west-004"). Derived from endpoint host when omitted. */
   B2_REGION?: string;
+  /**
+   * Optional key prefix for single-bucket layouts (e.g. "branding/").
+   * Prepended to every object key; list() query prefixes are scoped the same way.
+   */
+  B2_PREFIX?: string;
 }
 
 export interface B2PutOptions {
@@ -131,6 +136,7 @@ export class B2Storage {
   private readonly host: string;
   private readonly baseUrl: string;
   private readonly region: string;
+  private readonly prefix: string;
 
   constructor(env: B2Env) {
     this.env = env;
@@ -138,10 +144,17 @@ export class B2Storage {
     this.host = ep.host;
     this.baseUrl = ep.baseUrl;
     this.region = env.B2_REGION || regionFromHost(ep.host);
+    const p = (env.B2_PREFIX ?? '').replace(/^\/+/, '');
+    this.prefix = p === '' ? '' : p.endsWith('/') ? p : `${p}/`;
+  }
+
+  private fullKey(key: string): string {
+    const k = key.replace(/^\/+/, '');
+    return `${this.prefix}${k}`;
   }
 
   private objectUrl(key: string): string {
-    return `${this.baseUrl}/${encodeURIComponent(this.env.B2_BUCKET)}/${encodeKey(key)}`;
+    return `${this.baseUrl}/${encodeURIComponent(this.env.B2_BUCKET)}/${encodeKey(this.fullKey(key))}`;
   }
 
   private async signedHeaders(params: {
@@ -287,7 +300,9 @@ export class B2Storage {
   }
 
   async list(options?: string | { prefix?: string; cursor?: string; limit?: number }): Promise<B2ListResult> {
-    const prefix = typeof options === 'string' ? options : options?.prefix;
+    const rawPrefix = typeof options === 'string' ? options : options?.prefix;
+    // Scope listing to this storage's prefix; callers use logical (unprefixed) keys.
+    const prefix = rawPrefix != null && rawPrefix !== '' ? `${this.prefix}${rawPrefix.replace(/^\/+/, '')}` : this.prefix || undefined;
     const cursor = typeof options === 'string' ? undefined : options?.cursor;
     const limit = typeof options === 'string' ? undefined : options?.limit;
     const url = new URL(`${this.baseUrl}/${encodeURIComponent(this.env.B2_BUCKET)}`);

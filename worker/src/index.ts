@@ -91,18 +91,23 @@ export type Bindings = {
   CHATGPT_ADAPTER_KEY?: string;
 };
 
-function b2EnvFor(env: Bindings, bucket: string | undefined): Partial<B2Env> | undefined {
+function b2EnvFor(env: Bindings, bucket: string | undefined, prefix?: string): Partial<B2Env> | undefined {
   if (!bucket) return undefined;
   return {
     B2_KEY_ID: env.B2_KEY_ID ?? env.B2_APPLICATION_KEY_ID,
     B2_APPLICATION_KEY: env.B2_APPLICATION_KEY,
     B2_BUCKET: bucket,
     B2_ENDPOINT: env.B2_ENDPOINT,
+    B2_REGION: env.B2_REGION,
+    B2_PREFIX: prefix,
   };
 }
 
+// Single-bucket B2 layout (bucket rommm13-beacon-storage, EU):
+// logos -> branding/, components -> keys already namespaced (components/, rustdesk-installer/),
+// sessions -> sessions/ (see routes/sessions.ts key format).
 export function resolveLogosStorage(env: Bindings): AnyStorage {
-  return resolveStorage({ b2: b2EnvFor(env, env.B2_BUCKET_LOGOS ?? env.B2_BUCKET), r2: env.LOGOS });
+  return resolveStorage({ b2: b2EnvFor(env, env.B2_BUCKET_LOGOS ?? env.B2_BUCKET, 'branding/'), r2: env.LOGOS });
 }
 
 export function resolveComponentFilesStorage(env: Bindings): AnyStorage {

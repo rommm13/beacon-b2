@@ -467,7 +467,7 @@ sessions.post('/:id/files/upload', async (c) => {
   if (!c.req.raw.body) return c.json({ error: 'file body required' }, 400);
 
   const reqId = crypto.randomUUID();
-  const objectKey = `session-files/${c.req.param('id')}/${reqId}`;
+  const objectKey = `sessions/${c.req.param('id')}/${reqId}`;
   const storage = sessionFilesStorage(c.env);
   try {
     await storage.put(objectKey, c.req.raw.body, {
@@ -647,7 +647,7 @@ sessions.post('/:id/file-requests/:reqId/upload-result', async (c) => {
   if (declaredSize > MAX_SESSION_FILE_BYTES) return c.json({ error: 'file exceeds the 100 MiB limit' }, 413);
   if (!c.req.raw.body) return c.json({ error: 'file body required' }, 400);
 
-  const objectKey = `session-files/${c.req.param('id')}/${c.req.param('reqId')}`;
+  const objectKey = `sessions/${c.req.param('id')}/${c.req.param('reqId')}`;
   const storage = sessionFilesStorage(c.env);
   try {
     await storage.put(objectKey, c.req.raw.body, {
