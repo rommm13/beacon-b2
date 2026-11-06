@@ -1,0 +1,32 @@
+name = "beacon-b2-api"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+ALLOWED_ORIGIN = "https://beacon-b2-dashboard.pages.dev"
+WORKER_URL = "https://beacon-b2-api.<your-subdomain>.workers.dev"
+PAGES_PREVIEW_SUFFIX = ".beacon-b2-dashboard.pages.dev"
+# B2 (S3-compatible) storage — fill with real values before deploy; no secrets in this file.
+B2_ENDPOINT = "https://s3.<region>.backblazeb2.com"
+B2_REGION = "us-west-004"
+B2_BUCKET = "beacon-b2-placeholder"
+B2_BUCKET_LOGOS = "beacon-b2-logos-placeholder"
+B2_BUCKET_COMPONENT_FILES = "beacon-b2-components-placeholder"
+B2_BUCKET_SESSION_FILES = "beacon-b2-session-files-placeholder"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "beacon-pilot"
+database_id = "aa33fd74-e80a-4dba-8cb3-9a3e54621a39"
+
+[[durable_objects.bindings]]
+name = "SESSION"
+class_name = "SessionRelay"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["SessionRelay"]
+
+[triggers]
+crons = ["*/2 * * * *"]
