@@ -1,5 +1,20 @@
 # Beacon — Project Log
 
+## Session: 2026-11-06 — D1 rejects exec anti-replay LIKE query (500 on confirmed exec)
+
+Found during the first real end-to-end exec round-trip on the pilot deployment
+(beacon-b2-api + Honor laptop agent, company "Honor"): every confirmed
+`POST /v1/chatgpt/exec` returned a bare 500. `wrangler tail` + a direct
+`wrangler d1 execute` repro showed D1 failing the replay-guard query with
+`LIKE or GLOB pattern too complex: SQLITE_ERROR` — the adapter's
+`like(commands.payload, '%"adapter_nonce":"<uuid>"%')` pattern (two wildcards
+around a 36-char literal) exceeds D1's LIKE pattern-complexity limit. Fixed in
+`worker/src/routes/chatgpt.ts` by matching the nonce exactly via
+`json_extract(payload, '$.adapter_nonce') = <nonce>` (stronger protection than
+a substring search, and it executes fine on D1). Verified live: exec dispatch →
+agent ran the PowerShell → `commands.result` completed exit 0; replaying the
+spent confirm_id now correctly returns 409 instead of 500.
+
 ## Session: 2026-09-13 — Web Remote: fix false "no active sessions" on a Windows Server
 
 Reported live against a real Windows Server device: opening Web Remote gave
