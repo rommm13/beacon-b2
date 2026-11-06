@@ -64,3 +64,4 @@ new_sqlite_classes = ["SessionRelay"]
 #                           encrypts SSO provider client secrets at rest
 #   B2_APPLICATION_KEY_ID — Backblaze B2 application key ID (wrangler secret put)
 #   B2_APPLICATION_KEY    — Backblaze B2 application key (wrangler secret put)
+#   CHATGPT_ADAPTER_KEY   — Bearer key for /v1/chatgpt/* adapter (wrangler secret put)

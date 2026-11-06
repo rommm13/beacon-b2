@@ -35,6 +35,7 @@ import branding from './routes/branding';
 import componentFiles from './routes/component-files';
 import rustdeskInstallerDownload from './routes/rustdesk-installer-download';
 import rustdeskPassword from './routes/rustdesk-password';
+import chatgpt from './routes/chatgpt';
 import { activityLogMiddleware } from './lib/activityLog';
 import { timingSafeEqual } from './lib/auth';
 import { runScheduledMaintenance } from './lib/scheduled-maintenance';
@@ -86,6 +87,8 @@ export type Bindings = {
   B2_ENDPOINT?: string;
   B2_REGION?: string;
   B2_PRESIGN_EXPIRES_SECONDS?: string;
+  // Shared Bearer key for the ChatGPT MCP adapter (/v1/chatgpt/*). Unset = adapter disabled (503).
+  CHATGPT_ADAPTER_KEY?: string;
 };
 
 function b2EnvFor(env: Bindings, bucket: string | undefined): Partial<B2Env> | undefined {
@@ -175,6 +178,7 @@ app.route('/v1/admin/activity-log', adminActivityLog);
 app.route('/v1/admin/reports', adminReports);
 app.route('/v1/admin/settings', adminSettings);
 app.route('/v1/admin/rustdesk-settings', adminRustdeskSettings);
+app.route('/v1/chatgpt', chatgpt);
 app.route('/v1/auth', authRoute);
 app.route('/v1/auth/microsoft', authMicrosoft);
 
