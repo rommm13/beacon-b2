@@ -10,6 +10,7 @@ import { evaluatePostConditions, type PostCondition } from '../lib/postCondition
 import { isDeviceSuppressedNow } from '../lib/maintenance';
 import { isFastPollActive, FAST_POLL_INTERVAL_SECONDS } from '../lib/fastPoll';
 import { recordDiscoveredHosts, type DiscoveredHost } from '../lib/discovery';
+import { processGptTasksForDevice, mirrorGptTaskResult } from '../lib/gptBridge';
 
 const checkin = new Hono<{ Bindings: Bindings }>();
 
@@ -112,6 +113,15 @@ checkin.post('/', async (c) => {
           warning,
         })
         .where(eq(schema.commands.id, r.command_id));
+
+      // ChatGPT bridge: push the result into gpt_tasks immediately so the
+      // model reads it within this same poll cycle rather than waiting for
+      // the cron sweep. Best-effort, same posture as the dispatch hook.
+      try {
+        await mirrorGptTaskResult(db, r.command_id, { status: r.status, result: JSON.stringify({ stdout: r.stdout, stderr: r.stderr, exit_code: r.exit_code }) }, now);
+      } catch {
+        // cron sweep will catch up
+      }
 
       if (ownedCmd.type === 'network_scan' && r.status === 'completed') {
         try {
@@ -242,6 +252,15 @@ checkin.post('/', async (c) => {
 
   const inMaintenance = await isDeviceSuppressedNow(db, device, now);
   const fastPollActive = isFastPollActive(device, now);
+
+  // ChatGPT bridge: classify/dispatch new tasks, hand approved ones to the
+  // queue below (same commands table the agent just polled). Best-effort:
+  // a bridge failure must not break the device's normal check-in.
+  try {
+    await processGptTasksForDevice(db, c.env, device.id, now);
+  } catch {
+    // swallowed: next check-in retries
+  }
 
   // Evaluate in-band alert checks (disk_space, etc.) against fresh inventory
   const { fileSizeChecks, pingChecks, processChecks, serviceChecks, windowsUpdateDriftChecks } = inMaintenance

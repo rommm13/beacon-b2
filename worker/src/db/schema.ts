@@ -652,6 +652,30 @@ export const commands = sqliteTable('commands', {
   componentOrder: integer('component_order').notNull().default(1),
 });
 
+// ChatGPT task bridge — see migrations/0087_gpt_tasks_bridge.sql and lib/gptBridge.ts.
+// ChatGPT writes THIS table via the Cloudflare D1 API; the worker is the only
+// writer of commands rows derived from it. Approval is an HMAC token verified
+// here, never a plain column ChatGPT could UPDATE.
+export const gptTasks = sqliteTable('gpt_tasks', {
+  id:             text('id').primaryKey(),
+  requestId:      text('request_id').notNull().unique(),
+  deviceId:       text('device_id').notNull().references(() => devices.id, { onDelete: 'cascade' }),
+  companyId:      text('company_id').notNull().references(() => companies.id),
+  kind:           text('kind').notNull().default('powershell'),
+  script:         text('script').notNull(),
+  reason:         text('reason').notNull(),
+  status:         text('status').notNull().default('pending'),
+  classification: text('classification'),
+  commandId:      text('command_id'),
+  confirmToken:   text('confirm_token'),
+  result:         text('result'),
+  error:          text('error'),
+  requestedAt:    integer('requested_at').notNull(),
+  updatedAt:      integer('updated_at').notNull(),
+  completedAt:    integer('completed_at'),
+  expiresAt:      integer('expires_at').notNull(),
+});
+
 // Dynamic custom fields ("UDF" equivalent) — admin-defined named fields, values
 // stored per device. Not Datto's 300 fixed numbered slots; a real join table
 // (not a JSON blob on devices) so a future filter/targeting pass doesn't need

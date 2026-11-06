@@ -36,6 +36,7 @@ import componentFiles from './routes/component-files';
 import rustdeskInstallerDownload from './routes/rustdesk-installer-download';
 import rustdeskPassword from './routes/rustdesk-password';
 import chatgpt from './routes/chatgpt';
+import gptBridge from './routes/gpt-bridge';
 import { activityLogMiddleware } from './lib/activityLog';
 import { timingSafeEqual } from './lib/auth';
 import { runScheduledMaintenance } from './lib/scheduled-maintenance';
@@ -184,6 +185,7 @@ app.route('/v1/admin/reports', adminReports);
 app.route('/v1/admin/settings', adminSettings);
 app.route('/v1/admin/rustdesk-settings', adminRustdeskSettings);
 app.route('/v1/chatgpt', chatgpt);
+app.route('/v1/gpt-bridge', gptBridge);
 app.route('/v1/auth', authRoute);
 app.route('/v1/auth/microsoft', authMicrosoft);
 
