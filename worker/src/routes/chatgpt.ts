@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { drizzle } from 'drizzle-orm/d1';
-import { and, desc, eq, like } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import type { Bindings } from '../index';
 import * as schema from '../db/schema';
 import { sha256hex } from '../lib/crypto';
@@ -415,10 +415,14 @@ chatgpt.post('/exec', async (c) => {
 
   const commandId = crypto.randomUUID();
   const payloadWithNonce = { ...payload, adapter_nonce: verified.nonce };
-  const reused = await db.select({ id: schema.commands.id })
+  // json_extract instead of LIKE: D1 rejects long double-wildcard LIKE patterns
+  // ("LIKE or GLOB pattern too complex"), and an exact nonce match is stronger
+  // replay protection than a substring search anyway.
+  const candidates = await db.select({ id: schema.commands.id, payload: schema.commands.payload })
     .from(schema.commands)
-    .where(like(schema.commands.payload, `%"adapter_nonce":"${verified.nonce}"%`))
+    .where(sql`json_extract(${schema.commands.payload}, '$.adapter_nonce') = ${verified.nonce}`)
     .get();
+  const reused = candidates ?? null;
   if (reused) {
     await logActivity(db, {
       actorType: 'system',

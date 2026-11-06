@@ -4,7 +4,8 @@
 - Fork: https://github.com/rommm13/beacon-b2 (fork of synertek-cloud-services/beacon, history kept)
 - Branch: `feat/backblaze-b2` — NOT merged to main (merge only after B2 + agent tests pass)
 - Commits: f1d6bcd (B2 adapter) → 4ff57d6 (deploy config + MCP adapter doc) →
-  e8fe2a7 (CI fix) → af330d7 (deploy config fix). CI green on af330d7.
+  e8fe2a7 (CI fix) → af330d7 (deploy config fix) → d8ae3c0 (docs: B2 connected) →
+  fix: exec anti-replay via json_extract (D1 rejects long LIKE patterns). CI green on af330d7.
 - R2 bindings optional; B2 preferred via `resolveStorage` (SigV4, streaming, multipart).
   Auth checks on all routes preserved; one-time grant marking kept (presigned-URL
   hardening is a planned follow-up, see docs/CHATGPT_MCP_ADAPTER.md).
@@ -52,10 +53,34 @@
 3. Agent install: server + B2 verified; next is upstream v0.4.0 binary check
    (SHA-256 + Ed25519) then install with autostart. Say the word.
 
+## Agent on Honor — installed 2026-11-06
+- Desktop `install-honor-beacon.cmd` (self-elevating) ran by Roman; UAC consent given.
+- Service `BeaconAgent` ("Beacon RMM Agent"), Running, Automatic; agent 0.4.0;
+  tray running in user session; install dir `C:\Program Files\Beacon`,
+  state `C:\ProgramData\Beacon` (agent.log, credential.json).
+- Enrolled + approved: device `c6fff44a-8171-4379-a535-2f6122d5ca05`,
+  company "Honor" (`27eb7071-…`), host DESKTOP-QHVKN2K, Win 11 Pro 26300.9818.
+- Check-ins live: inventory flows (CPU/mem/disk/Defender). Network note:
+  direct Cloudflare connectivity from this laptop is flaky (intermittent
+  `wsarecv` timeouts in agent.log), but check-ins get through on retry;
+  same IP works instantly via local proxy 127.0.0.1:12334.
+
+## E2E exec round-trip — verified 2026-11-06 (first real device)
+- POST `/v1/chatgpt/exec` phase 1 → confirm_id; phase 2 (confirm) → command
+  `9fb73624-…` queued → agent picked it up on next check-in (fast-poll),
+  executed `run_script` PowerShell, exit 0, stdout stored in
+  `commands.result`, status `completed` (verified in D1 + agent.log).
+- Replay of the spent confirm_id correctly rejected 409.
+- Bug found & fixed en route: exec anti-replay used
+  `LIKE '%"adapter_nonce":"<uuid>"%'` on `commands.payload`; D1 fails that
+  with `LIKE or GLOB pattern too complex` (500 on every confirmed exec).
+  Replaced with `json_extract(payload,'$.adapter_nonce') = nonce` (exact
+  match, indexable, stronger). Deployed as version e5686e42.
+
 ## Not done (honest)
-- Full ChatGPT → Cloudflare MCP → Beacon → Agent path: adapter code is live
-  (`/v1/chatgpt/*`: two-phase exec, single-use confirm, audit read) and read
-  endpoints verified 200 — but no device enrolled yet, so exec dispatch and
-  result round-trip are untested.
+- Cloudflare MCP is not connected in current OpenCode sessions — Worker
+  tail/deploys done via wrangler CLI + OAuth token (refresh works).
 - Quota alerts / backup runbook: manual checks for now (B2 has no hard caps).
 - No merge to main, no tag yet.
+- Agent↔Cloudflare network flakiness on the Honor laptop not root-caused
+  (retry mask it for check-ins; could delay command pickup by ~1-2 min).
