@@ -1,8 +1,22 @@
 import { Hono } from 'hono';
 import type { Bindings } from '../index';
 import { sha256hex } from '../lib/crypto';
+import { resolveStorage } from '../lib/storage';
 
 const componentFiles = new Hono<{ Bindings: Bindings }>();
+
+function componentFilesStorage(env: Bindings) {
+  return resolveStorage({
+    b2: {
+      B2_KEY_ID: env.B2_KEY_ID,
+      B2_APPLICATION_KEY: env.B2_APPLICATION_KEY,
+      B2_BUCKET: env.B2_BUCKET_COMPONENT_FILES ?? env.B2_BUCKET,
+      B2_ENDPOINT: env.B2_ENDPOINT,
+      B2_REGION: env.B2_REGION,
+    },
+    r2: env.COMPONENT_FILES,
+  });
+}
 
 // An enrolled agent retrieves a component file with two independent proofs:
 // its long-lived device credential and the short-lived, command-specific grant
@@ -41,11 +55,14 @@ componentFiles.post('/download', async (c) => {
   if (grant.device_status === 'revoked') return c.json({ error: 'device revoked' }, 403);
   if (grant.command_status !== 'queued' && grant.command_status !== 'sent') return c.json({ error: 'command is no longer active' }, 409);
 
-  const object = await c.env.COMPONENT_FILES.get(grant.object_key);
-  if (!object) return c.json({ error: 'component file unavailable' }, 404);
+  // Mark downloaded_at before serving (atomically where possible via conditional UPDATE).
   await c.env.DB.prepare(
     `UPDATE component_file_downloads SET downloaded_at = ? WHERE id = ? AND downloaded_at IS NULL`
   ).bind(now, grant.id).run();
+
+  const storage = componentFilesStorage(c.env);
+  const object = await storage.get(grant.object_key);
+  if (!object) return c.json({ error: 'component file unavailable' }, 404);
 
   return new Response(object.body, {
     headers: {

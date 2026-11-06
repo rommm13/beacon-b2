@@ -18,30 +18,28 @@ PAGES_PREVIEW_SUFFIX = ".your-pages-project.pages.dev"
 # incoming request so it can't be misdirected by routing/proxy config.
 WORKER_URL = "https://your-api-domain.example.com"
 
+# Backblaze B2 (S3-compatible) object storage. R2 bucket bindings are NOT
+# required; configure B2 vars below and set secrets via `wrangler secret put`.
+# Keep bucket names/endpoint/region non-secret in vars; application keys are secrets.
+B2_ENDPOINT = "https://s3.us-west-004.backblazeb2.com"
+B2_REGION = "us-west-004"
+B2_BUCKET_LOGOS = "beacon-logos"
+B2_BUCKET_COMPONENT_FILES = "beacon-component-files"
+B2_BUCKET_SESSION_FILES = "beacon-session-files"
+B2_PRESIGN_EXPIRES_SECONDS = "900"
+
 # Optional hosted-scheduler secret. Keep it as a Worker secret, never a var:
 # # npx wrangler secret put INTERNAL_SCHEDULER_SECRET
+#
+# B2 secrets (set only via wrangler secret put; never commit values):
+# # npx wrangler secret put B2_APPLICATION_KEY_ID
+# # npx wrangler secret put B2_APPLICATION_KEY
 
 [[d1_databases]]
 binding = "DB"
 database_name = "beacon"
 database_id = "your-d1-database-id"
 migrations_dir = "../migrations"
-
-[[r2_buckets]]
-binding = "LOGOS"
-bucket_name = "beacon-logos"
-
-# Private Application Component installer and support files. Do not expose this
-# bucket through a public/custom domain; agents receive short-lived grants.
-[[r2_buckets]]
-binding = "COMPONENT_FILES"
-bucket_name = "beacon-component-files"
-
-# Private Web Remote file-transfer uploads/downloads (transient, per-session
-# -- see migration 0080). Do not expose through a public/custom domain.
-[[r2_buckets]]
-binding = "SESSION_FILES"
-bucket_name = "beacon-session-files"
 
 [triggers]
 crons = ["*/2 * * * *"]
@@ -64,3 +62,5 @@ new_sqlite_classes = ["SessionRelay"]
 #   ADMIN_SECRET          — break-glass bootstrap/recovery bearer token
 #   CONFIG_ENCRYPTION_KEY — 32 random bytes hex (e.g. `openssl rand -hex 32`),
 #                           encrypts SSO provider client secrets at rest
+#   B2_APPLICATION_KEY_ID — Backblaze B2 application key ID (wrangler secret put)
+#   B2_APPLICATION_KEY    — Backblaze B2 application key (wrangler secret put)

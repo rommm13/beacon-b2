@@ -38,6 +38,7 @@ import rustdeskPassword from './routes/rustdesk-password';
 import { activityLogMiddleware } from './lib/activityLog';
 import { timingSafeEqual } from './lib/auth';
 import { runScheduledMaintenance } from './lib/scheduled-maintenance';
+import { resolveStorage, type AnyStorage, type B2Env } from './lib/storage';
 
 export { SessionRelay } from './durable-objects/session-relay';
 
@@ -62,17 +63,52 @@ export type Bindings = {
   // c.req.url reflect the production route even under `wrangler dev`,
   // which previously sent local-dev sessions to the real production worker.
   WORKER_URL: string;
-  // Stores host-uploaded branding logos
-  LOGOS: R2Bucket;
+  // Stores host-uploaded branding logos (R2 fallback when B2 not configured)
+  LOGOS?: R2Bucket;
   // Private MSI installers and support files for Application Components.
-  COMPONENT_FILES: R2Bucket;
+  COMPONENT_FILES?: R2Bucket;
   // Private, short-lived Web Remote file-transfer uploads/downloads (see
   // routes/sessions.ts's .../files routes and migration 0080) -- separate
   // bucket from COMPONENT_FILES since these objects are transient
   // per-session transfers, not durable component assets, and never need
   // its retention/versioning story.
-  SESSION_FILES: R2Bucket;
+  SESSION_FILES?: R2Bucket;
+  // Backblaze B2 (S3-compatible) storage vars. When B2 application key id/key
+  // + B2_ENDPOINT + per-bucket name are present, B2 is preferred over R2 fallback.
+  B2_KEY_ID?: string;
+  B2_APPLICATION_KEY?: string;
+  /** Alias for compatibility with routes using the alternate binding name. */
+  B2_APPLICATION_KEY_ID?: string;
+  B2_BUCKET?: string;
+  B2_BUCKET_LOGOS?: string;
+  B2_BUCKET_COMPONENT_FILES?: string;
+  B2_BUCKET_SESSION_FILES?: string;
+  B2_ENDPOINT?: string;
+  B2_REGION?: string;
+  B2_PRESIGN_EXPIRES_SECONDS?: string;
 };
+
+function b2EnvFor(env: Bindings, bucket: string | undefined): Partial<B2Env> | undefined {
+  if (!bucket) return undefined;
+  return {
+    B2_KEY_ID: env.B2_KEY_ID ?? env.B2_APPLICATION_KEY_ID,
+    B2_APPLICATION_KEY: env.B2_APPLICATION_KEY,
+    B2_BUCKET: bucket,
+    B2_ENDPOINT: env.B2_ENDPOINT,
+  };
+}
+
+export function resolveLogosStorage(env: Bindings): AnyStorage {
+  return resolveStorage({ b2: b2EnvFor(env, env.B2_BUCKET_LOGOS ?? env.B2_BUCKET), r2: env.LOGOS });
+}
+
+export function resolveComponentFilesStorage(env: Bindings): AnyStorage {
+  return resolveStorage({ b2: b2EnvFor(env, env.B2_BUCKET_COMPONENT_FILES ?? env.B2_BUCKET), r2: env.COMPONENT_FILES });
+}
+
+export function resolveSessionFilesStorage(env: Bindings): AnyStorage {
+  return resolveStorage({ b2: b2EnvFor(env, env.B2_BUCKET_SESSION_FILES ?? env.B2_BUCKET), r2: env.SESSION_FILES });
+}
 
 const app = new Hono<{ Bindings: Bindings }>();
 

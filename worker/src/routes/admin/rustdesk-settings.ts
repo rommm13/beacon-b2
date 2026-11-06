@@ -4,6 +4,7 @@ import { drizzle } from 'drizzle-orm/d1';
 import type { Bindings } from '../../index';
 import * as schema from '../../db/schema';
 import { requireUser } from '../../lib/auth';
+import { resolveStorage } from '../../lib/storage';
 
 // Global RustDesk relay/rendezvous server config -- singleton (id=1), see
 // schema.rustdeskSettings's own doc comment. Admin-only both ways: unlike
@@ -57,15 +58,24 @@ rustdeskSettings.post('/admin/installer', async (c) => {
   if (!c.req.raw.body) return c.json({ error: 'file body required' }, 400);
 
   const db = drizzle(c.env.DB, { schema });
+  const storage = resolveStorage({
+    b2: {
+      B2_KEY_ID: c.env.B2_APPLICATION_KEY_ID,
+      B2_APPLICATION_KEY: c.env.B2_APPLICATION_KEY,
+      B2_BUCKET: c.env.B2_BUCKET_COMPONENT_FILES,
+      B2_ENDPOINT: c.env.B2_ENDPOINT,
+    },
+    r2: c.env.COMPONENT_FILES,
+  });
   const existing = await db.select({ objectKey: schema.rustdeskInstaller.objectKey }).from(schema.rustdeskInstaller).where(eq(schema.rustdeskInstaller.id, 1)).get();
   const objectKey = `rustdesk-installer/${crypto.randomUUID()}`;
-  await c.env.COMPONENT_FILES.put(objectKey, c.req.raw.body, {
+  await storage.put(objectKey, c.req.raw.body, {
     httpMetadata: { contentType: 'application/octet-stream' },
   });
   await db.update(schema.rustdeskInstaller).set({
     objectKey, version, sha256, sizeBytes: declaredSize, uploadedAt: Math.floor(Date.now() / 1000),
   }).where(eq(schema.rustdeskInstaller.id, 1));
-  if (existing?.objectKey) await c.env.COMPONENT_FILES.delete(existing.objectKey);
+  if (existing?.objectKey) await storage.delete(existing.objectKey);
   return c.json({ ok: true }, 201);
 });
 

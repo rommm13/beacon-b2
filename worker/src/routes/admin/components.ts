@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import type { Bindings } from '../../index';
 import { requireUser, roleAtLeast, type Role } from '../../lib/auth';
 import type { PostCondition } from '../../lib/postConditions';
+import { resolveStorage, type StorageObjectBody } from '../../lib/storage';
 
 const adminComponents = new Hono<{ Bindings: Bindings }>();
 
@@ -183,9 +184,21 @@ adminComponents.get('/', async (c) => {
 });
 
 // ── Application file lifecycle ────────────────────────────────────────────
-// These routes are deliberately registered ahead of /:id. R2 remains private:
+// These routes are deliberately registered ahead of /:id. Storage remains private:
 // administrators write through this authenticated endpoint and devices later
 // receive a short-lived capability, never an object URL.
+
+function componentFilesStorage(c: any) {
+  return resolveStorage({
+    b2: {
+      B2_KEY_ID: c.env.B2_APPLICATION_KEY_ID,
+      B2_APPLICATION_KEY: c.env.B2_APPLICATION_KEY,
+      B2_BUCKET: c.env.B2_BUCKET_COMPONENT_FILES,
+      B2_ENDPOINT: c.env.B2_ENDPOINT,
+    },
+    r2: c.env.COMPONENT_FILES,
+  });
+}
 
 adminComponents.post('/:id/files', async (c) => {
   if (!(await auth(c, 'technician'))) return c.json({ error: 'unauthorized' }, 401);
@@ -231,13 +244,15 @@ adminComponents.post('/:id/files', async (c) => {
 
   const id = uid();
   const objectKey = `components/${componentId}/${id}`;
+  const storage = componentFilesStorage(c);
   try {
-    // R2 recognizes the original request stream as fixed-length. Any wrapper
-    // stream loses that runtime marker, so validate the browser's automatic
-    // Content-Length against the dashboard's declared size and pass the body
-    // through unchanged.
-    await c.env.COMPONENT_FILES.put(objectKey, c.req.raw.body, {
+    // Pass the request body stream through unchanged. For R2 this preserves
+    // fixed-length handling; for B2 the adapter can stream/multipart as needed.
+    // Validate the browser's automatic Content-Length against the dashboard's
+    // declared size (checked above) and keep put-then-commit-then-delete order.
+    await storage.put(objectKey, c.req.raw.body, {
       httpMetadata: { contentType: c.req.header('Content-Type') ?? 'application/octet-stream' },
+      contentLength: declaredSize,
     });
     const now = Math.floor(Date.now() / 1000);
     await c.env.DB.prepare(
@@ -247,7 +262,7 @@ adminComponents.post('/:id/files', async (c) => {
     const row = await c.env.DB.prepare(`SELECT * FROM component_files WHERE id = ?`).bind(id).first<any>();
     return c.json(mapFile(row), 201);
   } catch (err) {
-    await c.env.COMPONENT_FILES.delete(objectKey);
+    await storage.delete(objectKey);
     return c.json({ error: err instanceof Error ? err.message : 'file upload failed' }, 400);
   }
 });
@@ -262,8 +277,9 @@ adminComponents.delete('/:id/files/:fileId', async (c) => {
   if (!file) return c.json({ error: 'file not found' }, 404);
   const installer = await c.env.DB.prepare(`SELECT component_id FROM component_applications WHERE installer_file_id = ?`).bind(file.id).first<any>();
   if (installer) return c.json({ error: 'choose another installer file before deleting this file' }, 409);
+  const storage = componentFilesStorage(c);
   await c.env.DB.prepare(`DELETE FROM component_files WHERE id = ?`).bind(file.id).run();
-  await c.env.COMPONENT_FILES.delete(file.object_key);
+  await storage.delete(file.object_key);
   return c.json({ ok: true });
 });
 
@@ -455,9 +471,10 @@ adminComponents.delete('/:id', async (c) => {
   if (row.origin === 'store') return c.json({ error: 'store components are read-only — clone to your library to edit' }, 403);
   const files = await c.env.DB.prepare(`SELECT object_key FROM component_files WHERE component_id = ?`).bind(id).all<{ object_key: string }>();
   await c.env.DB.prepare(`DELETE FROM components WHERE id = ?`).bind(id).run();
-  // R2 does not participate in D1's foreign-key cascade, so remove the
+  // Object storage does not participate in D1's foreign-key cascade, so remove the
   // corresponding private objects explicitly after the metadata is gone.
-  await Promise.all(files.results.map(file => c.env.COMPONENT_FILES.delete(file.object_key)));
+  const storage = componentFilesStorage(c);
+  await Promise.all(files.results.map(file => storage.delete(file.object_key)));
   return c.json({ ok: true });
 });
 
@@ -472,14 +489,16 @@ adminComponents.post('/:id/clone', async (c) => {
 
   // Verify source objects before making the clone row, so a missing private
   // object cannot leave a half-created application component behind.
+  // Clone copies objects via get+put through the storage adapter.
+  const storage = componentFilesStorage(c);
   const sourceFiles = await c.env.DB.prepare(
     `SELECT * FROM component_files WHERE component_id = ? ORDER BY created_at ASC`
   ).bind(sourceId).all<any>();
-  const sourceObjects = new Map<string, R2ObjectBody>();
+  const sourceObjects = new Map<string, StorageObjectBody | R2ObjectBody>();
   for (const file of sourceFiles.results) {
-    const sourceObject = await c.env.COMPONENT_FILES.get(file.object_key);
+    const sourceObject = await storage.get(file.object_key);
     if (!sourceObject) return c.json({ error: 'source application file is unavailable' }, 409);
-    sourceObjects.set(file.id, sourceObject);
+    sourceObjects.set(file.id, sourceObject as StorageObjectBody | R2ObjectBody);
   }
 
   const newId = uid();
@@ -522,15 +541,16 @@ adminComponents.post('/:id/clone', async (c) => {
   }
 
   // Application files cannot be shared across Components: every clone owns
-  // its own metadata and private R2 objects, keeping later edits/deletes
-  // isolated. Copy the objects server-side; no public download URL exists.
+  // its own metadata and private object-storage objects, keeping later edits/deletes
+  // isolated. Copy the objects server-side (get+put); no public download URL exists.
   const clonedFileIDs = new Map<string, string>();
   for (const file of sourceFiles.results) {
     const sourceObject = sourceObjects.get(file.id)!;
     const clonedFileId = uid();
     const clonedObjectKey = `components/${newId}/${clonedFileId}`;
-    await c.env.COMPONENT_FILES.put(clonedObjectKey, sourceObject.body, {
+    await storage.put(clonedObjectKey, sourceObject.body, {
       httpMetadata: { contentType: file.content_type ?? 'application/octet-stream' },
+      contentLength: file.size_bytes,
     });
     await c.env.DB.prepare(
       `INSERT INTO component_files (id, component_id, original_name, object_key, sha256, size_bytes, content_type, architecture, created_at)

@@ -7,8 +7,22 @@ import { requireUser } from '../lib/auth';
 import { generateToken, sha256hex } from '../lib/crypto';
 import { extendFastPoll } from '../lib/fastPoll';
 import { logActivity } from '../lib/activityLog';
+import { resolveStorage } from '../lib/storage';
 
 const sessions = new Hono<{ Bindings: Bindings }>();
+
+function sessionFilesStorage(env: Bindings) {
+  return resolveStorage({
+    b2: {
+      B2_KEY_ID: env.B2_KEY_ID,
+      B2_APPLICATION_KEY: env.B2_APPLICATION_KEY,
+      B2_BUCKET: env.B2_BUCKET_SESSION_FILES ?? env.B2_BUCKET,
+      B2_ENDPOINT: env.B2_ENDPOINT,
+      B2_REGION: env.B2_REGION,
+    },
+    r2: env.SESSION_FILES,
+  });
+}
 
 // Matches Application Components' own per-file cap (worker/src/routes/admin/components.ts) --
 // same reasoning, no need for a different number for a structurally similar upload.
@@ -454,9 +468,11 @@ sessions.post('/:id/files/upload', async (c) => {
 
   const reqId = crypto.randomUUID();
   const objectKey = `session-files/${c.req.param('id')}/${reqId}`;
+  const storage = sessionFilesStorage(c.env);
   try {
-    await c.env.SESSION_FILES.put(objectKey, c.req.raw.body, {
+    await storage.put(objectKey, c.req.raw.body, {
       httpMetadata: { contentType: c.req.header('Content-Type') ?? 'application/octet-stream' },
+      contentLength: declaredSize,
     });
     await db.insert(schema.sessionFileRequests).values({
       id: reqId,
@@ -476,7 +492,7 @@ sessions.post('/:id/files/upload', async (c) => {
     // generic 500 fires instead of this route's actual JSON error
     // response, hiding the real cause behind a useless "Internal Server
     // Error" with zero diagnostic detail.
-    try { await c.env.SESSION_FILES.delete(objectKey); } catch { /* already handling a real error below; don't let cleanup mask it */ }
+    try { await storage.delete(objectKey); } catch { /* already handling a real error below; don't let cleanup mask it */ }
     return c.json({ error: err instanceof Error ? err.message : 'upload failed' }, 400);
   }
 });
@@ -505,7 +521,8 @@ sessions.get('/:id/files/:reqId/download', async (c) => {
   try { result = row.result ? JSON.parse(row.result) : {}; } catch { /* fall through to the 404 below */ }
   if (!result.object_key) return c.json({ error: 'download not ready' }, 404);
 
-  const obj = await c.env.SESSION_FILES.get(result.object_key);
+  const storage = sessionFilesStorage(c.env);
+  const obj = await storage.get(result.object_key);
   if (!obj) return c.json({ error: 'file no longer available' }, 404);
 
   const headers = new Headers();
@@ -592,7 +609,8 @@ sessions.get('/:id/files/:reqId/blob', async (c) => {
   try { request = JSON.parse(row.request); } catch { /* fall through to the 404 below */ }
   if (!request.object_key) return c.json({ error: 'not found' }, 404);
 
-  const obj = await c.env.SESSION_FILES.get(request.object_key);
+  const storage = sessionFilesStorage(c.env);
+  const obj = await storage.get(request.object_key);
   if (!obj) return c.json({ error: 'file no longer available' }, 404);
   const headers = new Headers();
   obj.writeHttpMetadata(headers);
@@ -630,9 +648,11 @@ sessions.post('/:id/file-requests/:reqId/upload-result', async (c) => {
   if (!c.req.raw.body) return c.json({ error: 'file body required' }, 400);
 
   const objectKey = `session-files/${c.req.param('id')}/${c.req.param('reqId')}`;
+  const storage = sessionFilesStorage(c.env);
   try {
-    await c.env.SESSION_FILES.put(objectKey, c.req.raw.body, {
+    await storage.put(objectKey, c.req.raw.body, {
       httpMetadata: { contentType: c.req.header('Content-Type') ?? 'application/octet-stream' },
+      contentLength: declaredSize,
     });
     await db.update(schema.sessionFileRequests)
       .set({
@@ -645,7 +665,7 @@ sessions.post('/:id/file-requests/:reqId/upload-result', async (c) => {
   } catch (err) {
     // Same defensive cleanup-can't-mask-the-real-error fix as the
     // technician-facing upload route above -- see its own comment.
-    try { await c.env.SESSION_FILES.delete(objectKey); } catch { /* already handling a real error below; don't let cleanup mask it */ }
+    try { await storage.delete(objectKey); } catch { /* already handling a real error below; don't let cleanup mask it */ }
     return c.json({ error: err instanceof Error ? err.message : 'upload failed' }, 400);
   }
 });

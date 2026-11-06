@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import type { Bindings } from '../index';
 import { sha256hex } from '../lib/crypto';
+import { resolveStorage } from '../lib/storage';
 
 const rustdeskInstallerDownload = new Hono<{ Bindings: Bindings }>();
 
@@ -44,7 +45,16 @@ rustdeskInstallerDownload.post('/download', async (c) => {
   if (grant.command_status !== 'queued' && grant.command_status !== 'sent') return c.json({ error: 'command is no longer active' }, 409);
   if (!grant.object_key) return c.json({ error: 'installer unavailable' }, 404);
 
-  const object = await c.env.COMPONENT_FILES.get(grant.object_key);
+  const storage = resolveStorage({
+    b2: {
+      B2_KEY_ID: c.env.B2_APPLICATION_KEY_ID,
+      B2_APPLICATION_KEY: c.env.B2_APPLICATION_KEY,
+      B2_BUCKET: c.env.B2_BUCKET_COMPONENT_FILES,
+      B2_ENDPOINT: c.env.B2_ENDPOINT,
+    },
+    r2: c.env.COMPONENT_FILES,
+  });
+  const object = await storage.get(grant.object_key);
   if (!object) return c.json({ error: 'installer unavailable' }, 404);
   await c.env.DB.prepare(
     `UPDATE rustdesk_installer_downloads SET downloaded_at = ? WHERE id = ? AND downloaded_at IS NULL`

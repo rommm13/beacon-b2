@@ -27,6 +27,36 @@ scripts/      Utility scripts (local dev seeding, etc.)
 
 Data flow: agents enroll against the Worker API, then check in once a minute with host metrics (disk, CPU, memory, uptime, AV status). The Worker evaluates check-ins against a **policy → monitor** system (see below) and raises alerts. Remote shell/TCP sessions are proxied through a Durable Object so a technician's browser can reach an endpoint with no inbound firewall rule needed.
 
+## B2 architecture (feat/backblaze-b2)
+
+This branch migrates object storage to **Backblaze B2 over the S3-compatible API**. It does **not** use Cloudflare R2 and does **not** require a VPS.
+
+Text diagram:
+
+```
+ChatGPT
+  -> Cloudflare MCP (tool calls)
+    -> Beacon Worker (Cloudflare Workers, Hono + D1 + Durable Objects)
+      -> Backblaze B2 (S3-compatible endpoint, bucket objects)
+```
+
+Key points:
+- The Beacon Worker remains the control plane and API surface.
+- File/object payloads are stored in a B2 bucket via the S3-compatible endpoint/region configured for that bucket.
+- Secrets/IDs are supplied through Worker secrets or local dev vars; never commit real values. Use `.env.example` (repo root) and `worker/.env.example` as non-secret templates.
+
+### Redeploy from scratch (brief)
+
+1. **Upstream/license:** keep this fork aligned with upstream and preserve AGPL-3.0 licensing.
+   - Upstream: https://github.com/synertek-cloud-services/beacon
+   - License: keep `LICENSE` (AGPL-3.0) intact; preserve notices when redistributing/modifying.
+2. **B2:** create a Backblaze B2 bucket and an application key with the minimum required access; note bucket name, S3 endpoint, and region (example: `eu-central-003`).
+3. **Cloudflare:** create/configure the Worker (D1, Durable Objects, bindings as required by Beacon) and the dashboard/Pages project as in the upstream self-hosting flow.
+4. **Config:** copy example files locally (do not commit): `worker/wrangler.toml.example` -> `worker/wrangler.toml`, `worker/.dev.vars.example` -> `worker/.dev.vars`, `dashboard/.env.production` as needed; fill placeholders from `.env.example` / `worker/.env.example` with real B2 values via secrets/dev vars.
+5. **Database:** apply migrations (`make migrate-local` for local, Wrangler/D1 migration flow for production as per Beacon release process).
+6. **Deploy:** deploy Worker and dashboard; verify Worker health and a basic authenticated/API path before enrolling devices.
+7. **Validate:** confirm object read/write paths hit B2 (S3 API), and that no R2/VPS dependency is introduced.
+
 ## Features
 
 - **Device enrollment & approval** — token-based enrollment, per-company auto-approve or manual review

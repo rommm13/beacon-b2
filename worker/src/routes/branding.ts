@@ -4,6 +4,7 @@ import { drizzle } from 'drizzle-orm/d1';
 import type { Bindings } from '../index';
 import * as schema from '../db/schema';
 import { requireUser } from '../lib/auth';
+import { resolveStorage } from '../lib/storage';
 
 export const THEME_KEYS = [
   'canvas', 'surface', 'surfaceRaised', 'surfaceBrand', 'border', 'borderStrong',
@@ -26,6 +27,19 @@ function parseTokens(value: unknown): ThemeTokens | null {
 function noStore(c: any) { c.header('Cache-Control', 'no-store'); }
 function immutable(c: any) { c.header('Cache-Control', 'public, max-age=31536000, immutable'); }
 async function admin(c: any) { return requireUser(c.req.header('Authorization'), c.env, 'admin'); }
+
+function logosStorage(env: Bindings) {
+  return resolveStorage({
+    b2: {
+      B2_KEY_ID: env.B2_KEY_ID,
+      B2_APPLICATION_KEY: env.B2_APPLICATION_KEY,
+      B2_BUCKET: env.B2_BUCKET_LOGOS ?? env.B2_BUCKET,
+      B2_ENDPOINT: env.B2_ENDPOINT,
+      B2_REGION: env.B2_REGION,
+    },
+    r2: env.LOGOS,
+  });
+}
 
 const branding = new Hono<{ Bindings: Bindings }>();
 
@@ -80,7 +94,8 @@ branding.get('/identity', async (c) => {
 });
 
 branding.get('/logo/:key', async (c) => {
-  const obj = await c.env.LOGOS.get(c.req.param('key'));
+  const storage = logosStorage(c.env);
+  const obj = await storage.get(c.req.param('key'));
   if (!obj) return c.json({ error: 'logo not found' }, 404);
   const headers = new Headers();
   obj.writeHttpMetadata(headers);
@@ -134,9 +149,10 @@ branding.post('/admin/logo', async (c) => {
   const db = drizzle(c.env.DB, { schema });
   const existing = await db.select({ logoKey: schema.brandingIdentity.logoKey }).from(schema.brandingIdentity).where(eq(schema.brandingIdentity.id, 1)).get();
   const key = `${crypto.randomUUID()}.${ext}`;
-  await c.env.LOGOS.put(key, bytes, { httpMetadata: { contentType } });
+  const storage = logosStorage(c.env);
+  await storage.put(key, bytes, { httpMetadata: { contentType } });
   await db.update(schema.brandingIdentity).set({ logoKey: key, updatedAt: Math.floor(Date.now() / 1000) }).where(eq(schema.brandingIdentity.id, 1));
-  if (existing?.logoKey) await c.env.LOGOS.delete(existing.logoKey);
+  if (existing?.logoKey) await storage.delete(existing.logoKey);
   return c.json({ logoKey: key }, 201);
 });
 
@@ -145,7 +161,7 @@ branding.delete('/admin/logo', async (c) => {
   const db = drizzle(c.env.DB, { schema });
   const existing = await db.select({ logoKey: schema.brandingIdentity.logoKey }).from(schema.brandingIdentity).where(eq(schema.brandingIdentity.id, 1)).get();
   await db.update(schema.brandingIdentity).set({ logoKey: null, updatedAt: Math.floor(Date.now() / 1000) }).where(eq(schema.brandingIdentity.id, 1));
-  if (existing?.logoKey) await c.env.LOGOS.delete(existing.logoKey);
+  if (existing?.logoKey) await logosStorage(c.env).delete(existing.logoKey);
   return c.json({ ok: true });
 });
 
