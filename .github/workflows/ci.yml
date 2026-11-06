@@ -93,10 +93,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: |
-            worker/pnpm-lock.yaml
-            dashboard/pnpm-lock.yaml
 
       - name: Audit worker (pnpm)
         working-directory: worker
