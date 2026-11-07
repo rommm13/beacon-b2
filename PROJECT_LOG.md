@@ -1,5 +1,45 @@
 # Beacon — Project Log
 
+## Session: 2026-11-07 — ChatGPT bridge security redesign after live classifier bypass
+
+Roman ran independent tests through the real ChatGPT Cloudflare plugin and
+found a critical bypass: `hostname` + `cmd /c echo …` (two lines) was
+classified readonly and executed without confirmation. Root cause: the
+token-scanning classifier checked cmdlet-shaped tokens everywhere but bare
+commands only on the first line. Redesign, not regex patch:
+
+- gptDiagOps.ts: NO arbitrary script ever auto-executes. kind='diag'
+  auto-executes only worker-owned catalog scripts (10 diagnostics ops);
+  ChatGPT supplies an op NAME, the worker swaps in its own PowerShell text.
+  kind='powershell' (arbitrary text) ALWAYS requires a human HMAC confirm
+  token, even for pure read commands.
+- Origin signatures (bypass #3): check-in now hands the agent only commands
+  whose payload carries a valid HMAC (CONFIG_ENCRYPTION_KEY) over
+  command_id+device_id+payload. All 10 dispatch sites route payloads through
+  signCommandPayload; a row INSERTed directly into D1 without a signature is
+  failed at check-in with an audit entry. Verified live: unsigned INSERT
+  never reached the agent.
+- Status-forgery guard: an 'approved' row without the worker-stamped
+  classification is re-classified (found live: forged approved executed a
+  script before the guard; after the fix it lands back in pending_confirm).
+- Cyrillic stdout (whoami "система" mojibake): PS 5.1 redirected-stdout
+  encoding chains are unreliable (verified: plain → '?' destroyed, prologue
+  → reversible double-encode). Fixed with BEACON64: worker wraps dispatched
+  scripts to emit base64-of-UTF-8 and decodes it back when mirroring results.
+  Verified live via a UTF-8-clean client: "Проверка-русской-кодировки"
+  round-trips correctly.
+- test/gptBridge.test.ts: 20 unit tests covering the bypass reproduction,
+  aliases/iex/.NET/pipelines, token verification tamper cases, unsigned
+  rejection, BEACON64 round-trip.
+
+Live negative battery via the ChatGPT-equivalent D1 path: cmd/iex/.NET/
+pipeline probes all land in pending_confirm (probe file never created),
+protected-path variable probe denied, unknown diag op denied, real diag op
+auto-completed, replay rejected by UNIQUE, forged approved re-classified,
+unsigned command rejected with audit. Runbook (CHATGPT_BEACON_RUNBOOK.md)
+rewritten for the diag-catalog model, including a fresh §10 paste-in
+instruction for ChatGPT.
+
 ## Session: 2026-11-06 — D1 rejects exec anti-replay LIKE query (500 on confirmed exec)
 
 Found during the first real end-to-end exec round-trip on the pilot deployment
