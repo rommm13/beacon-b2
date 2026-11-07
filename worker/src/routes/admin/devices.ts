@@ -6,6 +6,7 @@ import * as schema from '../../db/schema';
 import { requireUser, type Role } from '../../lib/auth';
 import { resolveEffectiveMonitors } from '../../lib/alerts';
 import { extendFastPoll } from '../../lib/fastPoll';
+import { signCommandPayload } from '../../lib/gptBridge';
 import { encryptSecret, decryptSecret, sha256hex, generateToken } from '../../lib/crypto';
 import { generateRustdeskPassword } from '../../lib/rustdesk';
 
@@ -373,10 +374,10 @@ adminDevices.post('/:id/commands', async (c) => {
 
     const commandStmt = db.insert(schema.commands).values({
       id: cmdId, deviceId, companyId: device.companyId, type: 'install_rustdesk',
-      payload: JSON.stringify({
+      payload: await signCommandPayload(cmdId, deviceId, {
         download_token: fileToken, sha256: installer.sha256, size_bytes: installer.sizeBytes,
         password_token: passwordToken,
-      }),
+      }, c.env.CONFIG_ENCRYPTION_KEY),
       status: 'queued', createdAt: now,
     });
     const fileGrantStmt = db.insert(schema.rustdeskInstallerDownloads).values({
@@ -401,7 +402,7 @@ adminDevices.post('/:id/commands', async (c) => {
     deviceId,
     companyId: device.companyId,
     type: cmdType,
-    payload: JSON.stringify(payload),
+    payload: await signCommandPayload(id, deviceId, payload, c.env.CONFIG_ENCRYPTION_KEY),
     status: 'queued',
     createdAt: now,
   });

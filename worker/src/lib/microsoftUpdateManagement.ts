@@ -2,6 +2,7 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/d1';
 import * as schema from '../db/schema';
 import { fetchDeviceGroupIds } from './alerts';
+import { signCommandPayload } from './gptBridge';
 import {
   fetchEnabledPatchPolicies, fetchPatchPolicyCompanyIds, fetchPatchPolicyDeviceIds,
   fetchPatchPolicyGroupIds, fetchExcludedCompanyIds, deviceMatchesPatchPolicy,
@@ -21,8 +22,9 @@ type Device = typeof schema.devices.$inferSelect;
 //
 // Dispatched through commands, deliberately not the check-in wire protocol
 // -- same reasoning as every other Patch Policy capability this session.
-export async function syncMicrosoftUpdateManagement(DB: D1Database, now: number): Promise<void> {
+export async function syncMicrosoftUpdateManagement(DB: D1Database, now: number, configEncryptionKey?: string): Promise<void> {
   const db = drizzle(DB, { schema });
+  if (!configEncryptionKey) return; // manage_microsoft_update requires an origin signature: fail closed
 
   const policies = await fetchEnabledPatchPolicies(db);
   const managing = policies.filter(p => p.manageMicrosoftUpdate);
@@ -63,13 +65,14 @@ export async function syncMicrosoftUpdateManagement(DB: D1Database, now: number)
       ? { action: 'manage' as const }
       : { action: 'revert' as const, prior_state: device.microsoftUpdatePriorState ? JSON.parse(device.microsoftUpdatePriorState) : null };
 
+    const muCmdId = crypto.randomUUID();
     inserts.push(
       db.insert(schema.commands).values({
-        id: crypto.randomUUID(),
+        id: muCmdId,
         deviceId: device.id,
         companyId: device.companyId,
         type: 'manage_microsoft_update',
-        payload: JSON.stringify(payload),
+        payload: await signCommandPayload(muCmdId, device.id, payload, configEncryptionKey),
         status: 'queued',
         createdAt: now,
       }),

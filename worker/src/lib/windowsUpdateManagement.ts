@@ -2,6 +2,7 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/d1';
 import * as schema from '../db/schema';
 import { fetchDeviceGroupIds } from './alerts';
+import { signCommandPayload } from './gptBridge';
 import {
   fetchEnabledPatchPolicies, fetchPatchPolicyCompanyIds, fetchPatchPolicyDeviceIds,
   fetchPatchPolicyGroupIds, fetchExcludedCompanyIds, deviceMatchesPatchPolicy,
@@ -26,8 +27,9 @@ type Device = typeof schema.devices.$inferSelect;
 // mechanism as install_patches/network_scan), not the check-in wire
 // protocol -- deliberately, per this session's own earlier incident where
 // extending CheckInRequest/CheckInResponse broke check-in fleet-wide.
-export async function syncWindowsUpdateManagement(DB: D1Database, now: number): Promise<void> {
+export async function syncWindowsUpdateManagement(DB: D1Database, now: number, configEncryptionKey?: string): Promise<void> {
   const db = drizzle(DB, { schema });
+  if (!configEncryptionKey) return; // manage_windows_update requires an origin signature: fail closed
 
   const policies = await fetchEnabledPatchPolicies(db);
   const managing = policies.filter(p => p.manageWindowsUpdate);
@@ -73,13 +75,14 @@ export async function syncWindowsUpdateManagement(DB: D1Database, now: number): 
       ? { action: 'manage' as const }
       : { action: 'revert' as const, prior_state: device.windowsUpdatePriorState ? JSON.parse(device.windowsUpdatePriorState) : null };
 
+    const wuCmdId = crypto.randomUUID();
     inserts.push(
       db.insert(schema.commands).values({
-        id: crypto.randomUUID(),
+        id: wuCmdId,
         deviceId: device.id,
         companyId: device.companyId,
         type: 'manage_windows_update',
-        payload: JSON.stringify(payload),
+        payload: await signCommandPayload(wuCmdId, device.id, payload, configEncryptionKey),
         status: 'queued',
         createdAt: now,
       }),

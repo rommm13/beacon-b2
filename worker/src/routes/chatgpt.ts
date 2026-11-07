@@ -7,6 +7,7 @@ import { sha256hex } from '../lib/crypto';
 import { timingSafeEqual } from '../lib/auth';
 import { logActivity } from '../lib/activityLog';
 import { extendFastPoll } from '../lib/fastPoll';
+import { signCommandPayload, withUtf8Console } from '../lib/gptBridge';
 
 type ChatgptBindings = Bindings & { CHATGPT_ADAPTER_KEY?: string };
 
@@ -286,7 +287,7 @@ chatgpt.post('/exec', async (c) => {
     if (!script) return jsonError(c, 400, 'invalid_script', 'script is required for kind=powershell');
     const timeout = Math.min(Math.max(Number(body.timeout_seconds ?? 300) || 300, 5), 3600);
     action = script;
-    payload = { shell: 'powershell', script, timeout_seconds: timeout };
+    payload = { shell: 'powershell', script: withUtf8Console(script), timeout_seconds: timeout };
     cmdType = 'run_script';
   } else {
     const systemAction = body.action?.trim() ?? body.script?.trim() ?? '';
@@ -444,7 +445,7 @@ chatgpt.post('/exec', async (c) => {
     deviceId: device.id,
     companyId: device.companyId,
     type: cmdType,
-    payload: JSON.stringify(payloadWithNonce),
+    payload: await signCommandPayload(commandId, device.id, payloadWithNonce, c.env.CONFIG_ENCRYPTION_KEY),
     status: 'queued',
     createdAt: now,
   });

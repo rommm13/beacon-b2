@@ -4,6 +4,7 @@ import { and, eq } from 'drizzle-orm';
 import type { Bindings } from '../../index';
 import * as schema from '../../db/schema';
 import { requireUser } from '../../lib/auth';
+import { signCommandPayload } from '../../lib/gptBridge';
 
 const adminCommands = new Hono<{ Bindings: Bindings }>();
 
@@ -40,7 +41,7 @@ adminCommands.post('/', async (c) => {
     deviceId: body.device_id,
     companyId: body.company_id,
     type: body.type,
-    payload: JSON.stringify(body.payload),
+    payload: await signCommandPayload(id, body.device_id, body.payload as Record<string, unknown>, c.env.CONFIG_ENCRYPTION_KEY),
     createdAt: now,
   });
 

@@ -6,6 +6,7 @@ import * as schema from '../../db/schema';
 import { sha256hex, generateToken, encryptSecret } from '../../lib/crypto';
 import { requireUser, type Role } from '../../lib/auth';
 import { buildDiscoveryScanPayload } from '../../lib/discovery';
+import { signCommandPayload } from '../../lib/gptBridge';
 
 const adminCompanies = new Hono<{ Bindings: Bindings }>();
 
@@ -656,14 +657,15 @@ adminCompanies.post('/:id/discovery/scan-now', async (c) => {
     .where(eq(schema.networkDiscoveryConfigs.companyId, companyId)).get();
   if (!config) return c.json({ error: 'no discovery configuration for this company' }, 404);
 
-  const payload = await buildDiscoveryScanPayload(c.env.DB, c.env.CONFIG_ENCRYPTION_KEY, config);
+  const scanPayload = await buildDiscoveryScanPayload(c.env.DB, c.env.CONFIG_ENCRYPTION_KEY, config);
+  const scanId = crypto.randomUUID();
 
   await db.insert(schema.commands).values({
-    id: crypto.randomUUID(),
+    id: scanId,
     deviceId: config.probeDeviceId,
     companyId,
     type: 'network_scan',
-    payload,
+    payload: await signCommandPayload(scanId, config.probeDeviceId, JSON.parse(scanPayload) as Record<string, unknown>, c.env.CONFIG_ENCRYPTION_KEY),
     status: 'queued',
     createdAt: now,
   });

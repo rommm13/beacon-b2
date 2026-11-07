@@ -6,6 +6,7 @@ import { requireUser, roleAtLeast, type Role } from '../../lib/auth';
 import { logActivity } from '../../lib/activityLog';
 import { sha256hex } from '../../lib/crypto';
 import { fetchCompanyVariables } from '../../lib/companyVariables';
+import { signCommandPayload } from '../../lib/gptBridge';
 
 const adminJobs = new Hono<{ Bindings: Bindings }>();
 
@@ -225,7 +226,7 @@ async function insertJobCommands(
           file,
           token: uid(),
         })));
-        const applicationPayload = JSON.stringify({
+        const applicationPayload = await signCommandPayload(cmdId, device.id, {
           installer_file_id: payload.installer_file_id,
           installer_arguments: payload.installer_arguments,
           timeout_seconds: payload.timeout_seconds,
@@ -241,7 +242,7 @@ async function insertJobCommands(
           })),
           variables,
           run_as_system: runAsSystem,
-        });
+        }, configEncryptionKey);
         const command = db.prepare(`
           INSERT INTO commands (id, device_id, company_id, type, payload, status, created_at, job_id, component_id, component_order)
           VALUES (?, ?, ?, 'install_msi', ?, 'queued', ?, ?, ?, ?)
@@ -262,13 +263,13 @@ async function insertJobCommands(
       }
 
       const shell = resolveShell(payload.shell, device.os_type);
-      const scriptPayload = JSON.stringify({
+      const scriptPayload = await signCommandPayload(cmdId, device.id, {
         shell,
         script: payload.script,
         timeout_seconds: payload.timeout_seconds,
         variables,
         run_as_system: runAsSystem,
-      });
+      }, configEncryptionKey);
 
       inserts.push(
         db.prepare(`

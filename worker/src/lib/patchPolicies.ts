@@ -3,6 +3,7 @@ import { drizzle } from 'drizzle-orm/d1';
 import * as schema from '../db/schema';
 import { fetchDeviceGroupIds } from './alerts';
 import { logActivity } from './activityLog';
+import { signCommandPayload } from './gptBridge';
 
 type Db = ReturnType<typeof drizzle<typeof schema>>;
 type Device = typeof schema.devices.$inferSelect;
@@ -357,8 +358,9 @@ export async function autoApprovePatches(db: Db, now: number): Promise<void> {
 // own NOT EXISTS (SELECT 1 FROM commands WHERE job_id = j.id) idiom is
 // one-shot-only and doesn't generalize to a *recurring* weekly window --
 // see the re-dispatch guard below instead.
-export async function dispatchDuePatchPolicies(DB: D1Database, now: number): Promise<void> {
+export async function dispatchDuePatchPolicies(DB: D1Database, now: number, configEncryptionKey?: string): Promise<void> {
   const db = drizzle(DB, { schema });
+  if (!configEncryptionKey) return; // cannot sign install_patches without the key: fail closed
 
   await autoApprovePatches(db, now);
 
@@ -402,12 +404,13 @@ export async function dispatchDuePatchPolicies(DB: D1Database, now: number): Pro
         .map(patch => patch.updateId);
       if (eligible.length === 0) continue;
 
+      const patchCmdId = crypto.randomUUID();
       await db.insert(schema.commands).values({
-        id: crypto.randomUUID(),
+        id: patchCmdId,
         deviceId: device.id,
         companyId: device.companyId,
         type: 'install_patches',
-        payload: JSON.stringify({ update_ids: eligible, auto_reboot: policy.autoReboot }),
+        payload: await signCommandPayload(patchCmdId, device.id, { update_ids: eligible, auto_reboot: policy.autoReboot }, configEncryptionKey),
         status: 'queued',
         createdAt: now,
       });

@@ -3,6 +3,7 @@ import { drizzle } from 'drizzle-orm/d1';
 import * as schema from '../db/schema';
 import { logActivity } from './activityLog';
 import { fetchCompanyVariables } from './companyVariables';
+import { signCommandPayload } from './gptBridge';
 
 type Db = ReturnType<typeof drizzle<typeof schema>>;
 
@@ -67,12 +68,13 @@ export async function dispatchDueDiscoveryScans(DB: D1Database, configEncryption
 
     const credentials = await resolveDiscoveryCredentials(DB, configEncryptionKey, config.companyId, config.snmpEnabled, config.sshEnabled);
 
+    const scanId = crypto.randomUUID();
     await db.insert(schema.commands).values({
-      id: crypto.randomUUID(),
+      id: scanId,
       deviceId: config.probeDeviceId,
       companyId: config.companyId,
       type: 'network_scan',
-      payload: JSON.stringify({ cidr_ranges: JSON.parse(config.cidrRanges), ...credentials }),
+      payload: await signCommandPayload(scanId, config.probeDeviceId, { cidr_ranges: JSON.parse(config.cidrRanges), ...credentials }, configEncryptionKey),
       status: 'queued',
       createdAt: now,
     });

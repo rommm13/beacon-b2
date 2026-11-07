@@ -30,9 +30,9 @@ CF API-токен живёт в подключённом плагине Cloudfla
 ```
 ChatGPT → INSERT в gpt_tasks (через Cloudflare API)
         → worker классифицирует на ближайшем чек-ине агента (15-90 c)
-            readonly    → выполняется сразу
-            operational → ждёт confirm-токен от оператора (HMAC, не подделать)
-            blocked     → отказ (защищённые пути)
+            diag (из каталога)      → выполняется сразу (текст скрипта — рабочий, не твой)
+            powershell (произвольный) → ВСЕГДА ждёт confirm-токен оператора
+            blocked                 → отказ (защищённые пути)
         → агент выполняет PowerShell на ноутбуке
         → результат зеркалится в gpt_tasks.result
 ChatGPT → SELECT читает stdout/stderr/exit_code
@@ -40,6 +40,31 @@ ChatGPT → SELECT читает stdout/stderr/exit_code
 
 Статусы: `pending` → `pending_confirm` → `approved` → `queued` →
 `completed` | `failed` | `denied` | `timed_out` | `cancelled`.
+
+## 1.1 Модель безопасности (важно, обновлено 2026-11-07)
+
+Статический анализ PowerShell **не может** гарантировать безопасность —
+обход `hostname` + `cmd /c echo …` был исполнен автоматически и доказал это.
+Поэтому модель перестроена:
+
+1. **Автоматически исполняется ТОЛЬКО каталог диагностик** (`kind='diag'`):
+   в `script` пишется имя операции из списка §3, а реальный PowerShell-текст
+   принадлежит воркеру и подменяется им при dispatch. ChatGPT не может
+   вплести свой код в diag-вызов — неизвестное имя = denied.
+2. **Любой произвольный PowerShell (`kind='powershell'`) требует
+   человеческого подтверждения. Всегда.** Без исключений — не для `Get-*`,
+   не для `hostname`, ни для чего. Человек — граница безопасности.
+3. **`D:\ChatGPT-Disk`** — отказ на упоминание пути. Для произвольных
+   скриптов это удобное ускорение, НЕ граница (переменные/конкатенация могут
+   спрятать путь) — настоящая граница там пункт 2.
+4. **Подмена статуса бесполезна**: `approved` без рабочей классификации
+   воркер переклассифицирует заново; произвольный скрипт с подделанным
+   `approved` падает в `pending_confirm` и без токена не уйдёт.
+5. **Прямой INSERT в `commands` не работает**: чек-ин выдаёт агенту только
+   команды с серверной HMAC-подписью происхождения (`origin_sig` в payload),
+   которую нельзя вычислить без секрета воркера и нельзя перенести на чужую
+   command_id/скрипт. Без подписи команда отклоняется с аудитом
+   `[beacon: command rejected - missing or invalid server origin signature]`.
 
 ## 2. SQL-шаблоны (единственные запросы, которые нужны ChatGPT)
 
@@ -99,26 +124,34 @@ WHERE request_id='<traceable-id>' AND status IN ('pending','pending_confirm');
 POST `/v1/gpt-bridge/tasks/<task_id>/cancel` (см. §4). Своим UPDATE отменяй
 только до `queued`.
 
-## 3. Классификация (что выполнится без человека)
+## 3. Каталог диагностик (kind='diag') — единственный авто-путь
 
-**readonly — выполняется сразу:** `Get-*`, `Test-*`, `Measure-*`,
-`Select-Object`, `Where-Object`, `ForEach-Object`, `Sort-Object`, `Format-*`,
-`Out-String`, `ConvertTo-Json/Csv`, `Write-Output/Host`, `hostname`, `whoami`,
-`ipconfig`, `netstat`, `systeminfo`, `tasklist`, `ping`, `nslookup`, `tracert`,
-`route print`, `arp`, `Resolve-DnsName`.
+В `script` пиши ИМЯ операции. Полный список (2026-11-07):
 
-ВАЖНО: сканируется ВЕСЬ скрипт. Один изменяющий cmdlet в любом месте
-(в т.ч. внутри `{ }` или после `|`) = operational. Пример:
-`Get-ChildItem C:\ | Remove-Item` → operational (подтверждение).
+| op | Что вернёт |
+|---|---|
+| `system_info` | hostname, whoami, ОС, загрузка CPU, RAM |
+| `disk` | тома, свободное место, здоровье дисков |
+| `battery` | заряд, статус, оценка времени работы |
+| `network` | IP по интерфейсам, TCP-соединения, слушающие порты |
+| `processes` | топ-25 процессов по CPU + их количество |
+| `services` | работающие службы |
+| `startup` | автозагрузка (реестр + Startup-папка) |
+| `installed_apps` | установленные приложения (реестр Uninstall) |
+| `recent_errors` | последние 20 ошибок из журнала System |
+| `security_summary` | Defender, профили файрвола |
 
-**operational — нужен confirm-токен:** всё изменяющее (New-Item, Set-Content,
-Remove-Item, Stop/Start-Service, Stop-Process, install/uninstall, reboot).
+INSERT для диагностики: как §2.1, но `kind='diag'` и `script='system_info'`
+(имя из таблицы). Неизвестное имя → denied `unknown_kind_or_diag_op`.
+Вплести свой код в diag нельзя: текст скрипта подменяется рабочим из каталога.
 
 **blocked — отказ всегда:** любое вхождение `D:\ChatGPT-Disk` (или
-`d:/chatgpt-disk`) в скрипте. Диск неприкосновенен без отдельного письменного
+`d:/chatgpt-disk`) в script. Диск неприкосновенен без отдельного письменного
 разрешения владельца.
 
-## 4. Двухфазное выполнение (operational)
+## 4. Двухфазное выполнение (произвольный PowerShell — ВСЕГДА)
+
+Любой `kind='powershell'` (даже `hostname`) встаёт в `pending_confirm`:
 
 1. INSERT таска (как в 2.1), жди смены статуса (poll 2.2, 15-20 c).
 2. Статус станет `pending_confirm` (классификация `operational`).
@@ -133,7 +166,10 @@ WHERE id='<task_id>' AND status='pending_confirm';
    хэшу скрипта, TTL = TTL таска). Статус → `approved` → `queued` →
    `completed/failed`.
 6. Повторная запись токена ничего не даёт: одноразовость обеспечена
-   переходом статуса.
+   переходом статуса. Подделка `status='approved'` мимо токена не работает —
+   воркер переклассифицирует и вернёт в `pending_confirm`.
+
+Для 90% задач подтверждение не нужно: диагностика — это §3 (diag).
 
 ## 5. Ограничения
 
@@ -152,14 +188,20 @@ WHERE id='<task_id>' AND status='pending_confirm';
 ## 6. Безопасность (правила для ChatGPT)
 
 1. Никогда не пиши в `commands`, `users`, `devices` и прочие таблицы — только
-   `gpt_tasks` (INSERT/UPDATE confirm_token/UPDATE cancel) и SELECT.
-2. Не пытайся выставить `status='approved'` напрямую — воркер перезапишет,
-   команда не уйдёт. Approval только через токен из §4.
-3. `D:\ChatGPT-Disk` — запрещённая зона (классификатор отклонит).
-4. Реестр, службы, сети, VPN, SSH, Windows Update — через operational с
-   объяснением Роману, зачем. Диагностику (readonly) не блокируй себе сам.
+   `gpt_tasks` (INSERT/UPDATE confirm_token/UPDATE cancel) и SELECT. Прямая
+   вставка в `commands` бессмысленна: unsigned команда отклоняется
+   origin-guard'ом на чек-ине и не исполняется.
+2. Не пытайся выставить `status='approved'` напрямую — воркер
+   переклассифицирует: произвольный скрипт вернётся в `pending_confirm`,
+   approval только через токен из §4.
+3. `D:\ChatGPT-Disk` — запрещённая зона (отказ на упоминание пути).
+4. Реестр, службы, сети, VPN, SSH, Windows Update — только произвольный
+   PowerShell через §4 с объяснением Роману, зачем. Диагностика — §3 (diag,
+   без подтверждений).
 5. `reason` всегда заполняй честно — это аудит.
 6. Не размещай секреты/пароли в script — они попадут в D1-лог.
+7. Русский текст в выводе теперь корректен: воркер оборачивает каждый скрипт
+   в UTF-8-пролог (`[Console]::OutputEncoding = UTF8`).
 
 ## 7. Восстановление при сбоях
 
@@ -210,12 +252,15 @@ database_id=aa33fd74-e80a-4dba-8cb3-9a3e54621a39
 DEVICE_ID=c6fff44a-8171-4379-a535-2f6122d5ca05
 COMPANY_ID=27eb7071-267e-4847-aea4-c5fe25368c5b
 
-ОТПРАВИТЬ КОМАНДУ:
+ДИАГНОСТИКА (авто-исполнение, 15-90 c) — для всего чтения:
 INSERT INTO gpt_tasks (id, request_id, device_id, company_id, kind, script,
 reason, status, requested_at, updated_at, expires_at)
 VALUES ('<uuid>', '<уникальный-id-с-датой>', '<DEVICE_ID>', '<COMPANY_ID>',
-'powershell', '<PS-скрипт>', '<зачем>', 'pending',
+'diag', '<имя-операции>', '<зачем>', 'pending',
 strftime('%s','now'), strftime('%s','now'), strftime('%s','now')+3600);
+Имена операций (только эти): system_info, disk, battery, network, processes,
+services, startup, installed_apps, recent_errors, security_summary.
+Свободный текст в script при kind='diag' = отказ.
 
 ПРОВЕРИТЬ/ПРОЧЕСТЬ:
 SELECT status, classification, result, error FROM gpt_tasks
@@ -227,16 +272,24 @@ SELECT hostname, os_version, agent_version, status, last_seen, inventory
 FROM devices WHERE id='<DEVICE_ID>';
 (last_seen отстаёт >5 мин = ноутбук offline)
 
+ПРОИЗВОЛЬНЫЙ POWERSHELL (только когда diag-каталога не хватает):
+Тот же INSERT, но kind='powershell' и в script — текст скрипта. ЛЮБОЙ такой
+скрипт (даже hostname) встанет в pending_confirm. Скажи мне, что нужен
+confirm-токен для <task_id> и зачем, я выдам токен, запиши его:
+UPDATE gpt_tasks SET confirm_token='<токен>' WHERE id='<task_id>'
+AND status='pending_confirm';
+После этого команда исполнится автоматически.
+
 ПРАВИЛА:
-1. Читай-команды (Get-*, hostname, ipconfig, tasklist...) выполняются
-   автоматически за 15-90 c. Просто INSERT и жди.
-2. Изменяющие (New/Set/Remove/Start/Stop, install) встанут в
-   pending_confirm — скажи мне, я дам confirm-токен, запиши его:
-   UPDATE gpt_tasks SET confirm_token='<токен>' WHERE id='<task_id>'
-   AND status='pending_confirm';
-3. D:\ChatGPT-Disk трогать запрещено — отклонит систему.
-4. commands/devices/users — НЕ трогай, только gpt_tasks и чтение devices.
-5. Если timed_out — создай заново с новым request_id.
+1. Чтение — ТОЛЬКО через diag-операции, не пиши произвольные скрипты ради
+   Get-запросов (их всё равно не пустят без меня).
+2. D:\ChatGPT-Disk трогать запрещено — отклонит система.
+3. commands/devices/users — НЕ трогай, только gpt_tasks и чтение devices.
+   INSERT в commands не работает: unsigned команды отклоняются.
+4. Подделка status='approved' не работает — воркер переклассифицирует.
+5. Если timed_out — создай заново с новым request_id (повтор request_id
+   отклоняется уникальным индексом — дубль невозможен).
 6. reason заполняй всегда — это аудит.
-7. Скрипты без интерактива (-NonInteractive), таймаут 300 с.
+7. Скрипты без интерактива (-NonInteractive), таймаут 300 с, до 32000
+   символов. Русский текст в stdout читается корректно.
 ```

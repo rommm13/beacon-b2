@@ -17,9 +17,9 @@ export async function runScheduledMaintenance(env: Bindings, now = Math.floor(Da
   await evaluateOfflineAlerts(env.DB, env, now);
   await dispatchDueScheduledJobs(env.DB, env.CONFIG_ENCRYPTION_KEY, now);
   await cancelExpiredScheduledJobs(env.DB, now);
-  await dispatchDuePatchPolicies(env.DB, now);
-  await syncWindowsUpdateManagement(env.DB, now);
-  await syncMicrosoftUpdateManagement(env.DB, now);
+  await dispatchDuePatchPolicies(env.DB, now, env.CONFIG_ENCRYPTION_KEY);
+  await syncWindowsUpdateManagement(env.DB, now, env.CONFIG_ENCRYPTION_KEY);
+  await syncMicrosoftUpdateManagement(env.DB, now, env.CONFIG_ENCRYPTION_KEY);
   await dispatchDueDiscoveryScans(env.DB, env.CONFIG_ENCRYPTION_KEY, now);
   await pruneActivityLog(env.DB, now);
   await gptBridgeSweep(drizzle(env.DB, { schema }), now);

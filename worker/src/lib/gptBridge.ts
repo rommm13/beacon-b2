@@ -28,48 +28,16 @@ const STATUS_FAILED = 'failed';
 // the command (same expires semantics as scheduled jobs).
 const TASK_TTL_SECONDS = 60 * 60;
 
-export const GPT_BRIDGE_DENY_PREFIXES = ['d:\\chatgpt-disk', 'd:/chatgpt-disk'];
-
 // ── Classification ───────────────────────────────────────────────────────────
-// Readonly is decided by scanning the WHOLE script: every cmdlet-shaped token
-// (Verb-Noun) must be a known readonly verb. This closes the pipeline hole
-// (Get-ChildItem … | Remove-Item) and the script-block hole
-// (ForEach-Object { Remove-Item … }): any single unknown or mutator cmdlet
-// anywhere makes the task operational (needs approval). A cmdlet name inside a
-// string only costs a false "operational" (one confirmation), never the
-// reverse.
-const READONLY_CMDLETS = new Set([
-  'get-', 'test-', 'measure-', 'compare-object', 'select-object', 'where-object',
-  'foreach-object', 'sort-object', 'format-', 'out-string', 'convertto-json',
-  'convertto-csv', 'write-output', 'write-host', 'resolve-dnsname', 'ping',
-  'hostname', 'whoami', 'ipconfig', 'netstat', 'systeminfo', 'tasklist',
-  'nslookup', 'tracert', 'route', 'print', 'arp', 'nbtstat', 'ver', 'vol', 'cls',
-]);
+// Re-exported from gptDiagOps.ts — security model lives there: kind='diag'
+// auto-executes ONLY worker-owned catalog scripts; kind='powershell' (arbitrary
+// script text) ALWAYS requires human confirmation; D:\ChatGPT-Disk mention is
+// a fast-fail block (not the real boundary for arbitrary scripts — the human
+// is).
+import { classifyGptTask, DIAG_OPS } from './gptDiagOps';
 
-function isReadonlyToken(token: string): boolean {
-  const t = token.toLowerCase();
-  if (READONLY_CMDLETS.has(t)) return true;
-  return [...READONLY_CMDLETS].some(p => t.startsWith(p));
-}
-
-function mentionsProtectedPath(script: string): boolean {
-  const lower = script.toLowerCase();
-  return GPT_BRIDGE_DENY_PREFIXES.some(p => lower.includes(p));
-}
-
-export function classifyGptTask(kind: string, script: string): 'readonly' | 'operational' | 'dangerous' | 'blocked' {
-  if (mentionsProtectedPath(script)) return 'blocked';
-  if (kind !== 'powershell') return 'dangerous'; // system actions: reboot etc.
-  if (!script.trim()) return 'dangerous';
-  // Every cmdlet-shaped token anywhere in the script must be readonly.
-  const candidates = script.match(/[a-zA-Z][a-zA-Z0-9]*-[a-zA-Z][a-zA-Z0-9]*/g) ?? [];
-  if (candidates.some(c => !isReadonlyToken(c))) return 'operational';
-  // Bare first command of the first line (hostname, whoami, ipconfig, …).
-  const first = script.split('\n').map(l => l.trim()).find(l => l && !l.startsWith('#'));
-  const verb = first?.split('|')[0]!.trim().split(/\s+/)[0]!.toLowerCase().replace(/^&\s*/, '') ?? '';
-  if (verb && !isReadonlyToken(verb)) return 'operational';
-  return 'readonly';
-}
+export { GPT_BRIDGE_DENY_PREFIXES } from './gptDiagOps';
+export type { GptClassification } from './gptDiagOps';
 
 // ── Approval token (HMAC over the task identity, not a stored flag) ─────────
 // CONFIG_ENCRYPTION_KEY never leaves the worker; the token is shown once to
@@ -136,13 +104,58 @@ export async function verifyGptConfirmToken(token: string, secret: string): Prom
   }
 }
 
+// ── Command origin signatures ────────────────────────────────────────────────
+// The check-in path refuses to hand any CODE-EXECUTING command to an agent
+// unless its payload carries a valid HMAC (CONFIG_ENCRYPTION_KEY) over
+// command_id + device_id + payload. This is the trust boundary for direct D1
+// writers: a row INSERTed straight into commands (no worker code path) has no
+// signature and is failed on the next check-in instead of executing on the
+// device. The signature lives INSIDE the payload it signs (added just before
+// signing), so modifying any field — including the signature itself — breaks
+// verification.
+// Command types whose payload leads to process/script execution on the device.
+// Only these require the origin signature; the rest (session open, restart,
+// measurements, agent lifecycle) keep working unsigned for compatibility.
+export const SIGNED_COMMAND_TYPES = new Set([
+  'run_script', 'install_msi', 'install_rustdesk', 'install_patches',
+  'manage_windows_update', 'manage_microsoft_update', 'network_scan',
+]);
+
+export async function signCommandOrigin(commandId: string, deviceId: string, payload: Record<string, unknown>, secret: string): Promise<string> {
+  const material = JSON.stringify({ commandId, deviceId, payload });
+  return hmacSignHex(material, secret);
+}
+
+export async function verifyCommandOrigin(commandId: string, deviceId: string, type: string, payloadJson: string, secret?: string): Promise<boolean> {
+  if (!SIGNED_COMMAND_TYPES.has(type)) return true; // not code-executing: no signature required
+  if (!secret) return false; // signed type but no key configured: fail closed
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(payloadJson) as Record<string, unknown>;
+  } catch {
+    return false;
+  }
+  const { origin_sig: originSig, ...rest } = parsed as { origin_sig?: string };
+  if (!originSig) return false;
+  const material = JSON.stringify({ commandId, deviceId, payload: rest });
+  return hmacVerifyHex(material, originSig, secret);
+}
+
+// Adds the origin signature to a code-executing command's payload object
+// before it is stored. Every dispatch site that creates SIGNED_COMMAND_TYPES
+// rows must route its payload through this.
+export async function signCommandPayload(commandId: string, deviceId: string, payloadObj: Record<string, unknown>, secret: string): Promise<string> {
+  payloadObj.origin_sig = await signCommandOrigin(commandId, deviceId, payloadObj, secret);
+  return JSON.stringify(payloadObj);
+}
+
 // ── Dispatch: gpt_tasks row → real Beacon command ────────────────────────────
 // Called from the check-in path (agent polls gpt_tasks implicitly through the
 // worker) and from the cron sweep. Idempotent via request_id UNIQUE.
 const MAX_SCRIPT_CHARS = 32000;
 const MAX_CONCURRENT_TASKS_PER_DEVICE = 5;
 
-export async function dispatchApprovedGptTask(db: Db, taskId: string, now: number): Promise<void> {
+export async function dispatchApprovedGptTask(db: Db, env: { CONFIG_ENCRYPTION_KEY?: string }, taskId: string, now: number, scriptOverride?: string): Promise<void> {
   const task = await db.select().from(schema.gptTasks).where(eq(schema.gptTasks.id, taskId)).get();
   if (!task || task.commandId || task.status !== STATUS_APPROVED) return;
 
@@ -169,31 +182,32 @@ export async function dispatchApprovedGptTask(db: Db, taskId: string, now: numbe
   // The agent's Execute() only knows run_script/install_* — an unknown type is
   // silently ignored, so "system" actions must be translated here. Only reboot
   // is offered; everything else is denied rather than sent as a no-op.
+  const secret = env.CONFIG_ENCRYPTION_KEY;
+  if (!secret) {
+    // No signing key configured: fail closed rather than dispatch unsigned.
+    await db.update(schema.gptTasks).set({ status: STATUS_DENIED, error: 'signing_key_unavailable', updatedAt: now }).where(eq(schema.gptTasks.id, taskId));
+    return;
+  }
+  let payloadObj: Record<string, unknown>;
   if (task.kind === 'system') {
     if (task.script.trim().toLowerCase() !== 'reboot') {
       await db.update(schema.gptTasks).set({ status: STATUS_DENIED, error: 'unsupported_system_action', updatedAt: now }).where(eq(schema.gptTasks.id, taskId));
       return;
     }
-    await db.insert(schema.commands).values({
-      id: commandId,
-      deviceId: task.deviceId,
-      companyId: task.companyId,
-      type: 'run_script',
-      payload: JSON.stringify({ shell: 'powershell', script: 'shutdown /r /t 0', timeout_seconds: 30 }),
-      status: 'queued',
-      createdAt: now,
-    });
+    payloadObj = { shell: 'powershell', script: 'shutdown /r /t 0', timeout_seconds: 30 };
   } else {
-    await db.insert(schema.commands).values({
-      id: commandId,
-      deviceId: task.deviceId,
-      companyId: task.companyId,
-      type: 'run_script',
-      payload: JSON.stringify({ shell: 'powershell', script: task.script, timeout_seconds: 300 }),
-      status: 'queued',
-      createdAt: now,
-    });
+    payloadObj = { shell: 'powershell', script: withUtf8Console(scriptOverride ?? task.script), timeout_seconds: 300 };
   }
+  payloadObj.origin_sig = await signCommandOrigin(commandId, task.deviceId, payloadObj, secret);
+  await db.insert(schema.commands).values({
+    id: commandId,
+    deviceId: task.deviceId,
+    companyId: task.companyId,
+    type: 'run_script',
+    payload: JSON.stringify(payloadObj),
+    status: 'queued',
+    createdAt: now,
+  });
 
   await db.update(schema.gptTasks)
     .set({ status: STATUS_QUEUED, commandId, updatedAt: now, expiresAt: now + TASK_TTL_SECONDS })
@@ -223,6 +237,7 @@ export async function processGptTasksForDevice(
     }
 
     let status = task.status;
+    let scriptToRun = task.script;
     if (status === STATUS_PENDING) {
       if (task.script.length > MAX_SCRIPT_CHARS) {
         await db.update(schema.gptTasks).set({ status: STATUS_DENIED, error: 'script_too_large', updatedAt: now }).where(eq(schema.gptTasks.id, task.id));
@@ -233,9 +248,39 @@ export async function processGptTasksForDevice(
         await db.update(schema.gptTasks).set({ status: STATUS_DENIED, classification: cls, error: 'protected_path_denied', updatedAt: now }).where(eq(schema.gptTasks.id, task.id));
         continue;
       }
-      // readonly → auto-approve; anything else waits for an HMAC token.
+      if (cls === 'dangerous') {
+        await db.update(schema.gptTasks).set({ status: STATUS_DENIED, classification: cls, error: 'unknown_kind_or_diag_op', updatedAt: now }).where(eq(schema.gptTasks.id, task.id));
+        continue;
+      }
+      // diag → swap in the worker-owned catalog script; arbitrary powershell →
+      // keeps its own text and ALWAYS waits for a human confirm token.
+      if (task.kind === 'diag') {
+        scriptToRun = DIAG_OPS[task.script.trim().toLowerCase()]!.script;
+      }
       status = cls === 'readonly' ? STATUS_APPROVED : STATUS_PENDING_CONFIRM;
       await db.update(schema.gptTasks).set({ classification: cls, status, updatedAt: now }).where(eq(schema.gptTasks.id, task.id));
+    } else if (status === STATUS_APPROVED && !task.classification) {
+      // STATUS FORGERY GUARD: 'approved' is a plain column a direct D1 writer
+      // can set on INSERT (proven live by the neg8 test). Approval that the
+      // worker itself granted always carries a classification — it is stamped
+      // in the same UPDATE that transitions pending → approved. An approved
+      // row without one was never classified, so classify it now: diag ops
+      // get dispatched with the catalog script, anything else drops to
+      // pending_confirm and still requires a real human token.
+      const cls = classifyGptTask(task.kind, task.script);
+      if (cls === 'blocked' || cls === 'dangerous') {
+        await db.update(schema.gptTasks).set({ status: STATUS_DENIED, classification: cls, error: 'forged_status_blocked', updatedAt: now }).where(eq(schema.gptTasks.id, task.id));
+        continue;
+      }
+      if (task.kind === 'diag' && cls === 'readonly') {
+        scriptToRun = DIAG_OPS[task.script.trim().toLowerCase()]!.script;
+        await db.update(schema.gptTasks).set({ classification: cls, updatedAt: now }).where(eq(schema.gptTasks.id, task.id));
+      } else {
+        // Arbitrary script with forged approval: strip the forged status,
+        // demand the real token.
+        status = STATUS_PENDING_CONFIRM;
+        await db.update(schema.gptTasks).set({ classification: cls, status, updatedAt: now }).where(eq(schema.gptTasks.id, task.id));
+      }
     }
 
     if (status === STATUS_PENDING_CONFIRM && task.confirmToken && env.CONFIG_ENCRYPTION_KEY) {
@@ -257,7 +302,7 @@ export async function processGptTasksForDevice(
     }
 
     if (status === STATUS_APPROVED) {
-      await dispatchApprovedGptTask(db, task.id, now);
+      await dispatchApprovedGptTask(db, env, task.id, now, scriptToRun);
     }
   }
 }
@@ -284,13 +329,21 @@ export async function gptBridgeSweep(db: Db, now: number): Promise<void> {
     const cmd = await db.select({ status: schema.commands.status, result: schema.commands.result })
       .from(schema.commands).where(eq(schema.commands.id, t.commandId)).get();
     if (!cmd) continue;
-    if (cmd.status === 'completed') {
+    if (cmd.status === 'completed' || cmd.status === 'failed') {
+      let resultJson = cmd.result;
+      if (resultJson) {
+        try {
+          const parsed = JSON.parse(resultJson) as { stdout?: string; stderr?: string };
+          if (parsed.stdout) parsed.stdout = decodeBeacon64Stdout(parsed.stdout);
+          if (parsed.stderr) parsed.stderr = decodeBeacon64Stdout(parsed.stderr);
+          resultJson = JSON.stringify(parsed);
+        } catch {
+          // keep raw result on any decode problem
+        }
+      }
       await db.update(schema.gptTasks).set({
-        status: STATUS_COMPLETED, result: cmd.result, completedAt: now, updatedAt: now,
-      }).where(eq(schema.gptTasks.id, t.id));
-    } else if (cmd.status === 'failed') {
-      await db.update(schema.gptTasks).set({
-        status: STATUS_FAILED, result: cmd.result, completedAt: now, updatedAt: now,
+        status: cmd.status === 'completed' ? STATUS_COMPLETED : STATUS_FAILED,
+        result: resultJson, completedAt: now, updatedAt: now,
       }).where(eq(schema.gptTasks.id, t.id));
     }
   }
@@ -324,6 +377,48 @@ export async function mirrorGptTaskResult(db: Db, commandId: string, cmd: { stat
 // Operator-initiated cancel: flips the task and, if its command hasn't been
 // sent yet, kills the queued command too. Commands already sent to the agent
 // cannot be recalled — the task is marked cancelled but the command runs.
+// PowerShell 5.1 + redirected stdout mangles non-ASCII deterministically but
+// unreliably to repair (CP866/CP1251 double-encode chains verified live:
+// plain → '?' destroyed, prologue/chcp → reversible-but-ugly double-encode).
+// The robust fix is to never let non-ASCII travel the pipe: wrap the script
+// so its output is emitted as base64 of UTF-8 bytes (ASCII-only, survives
+// every encoding chain), and decode it back in the check-in result mirror.
+export function withUtf8Console(script: string): string {
+  const prologue = 'try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}';
+  const payload = `${prologue}\n${script}`;
+  return [
+    '$__beaconLines = New-Object System.Collections.Generic.List[string]',
+    'try {',
+    '  $__out = & {', // script runs in a child scope
+    payload.split('\n').map(l => `    ${l}`).join('\n'),
+    '  } 2>&1 | Out-String',
+    '  $__beaconLines.Add([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($__out)))',
+    '} catch {',
+    '  $__beaconLines.Add([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("BRIDGE_ERROR: " + $_.Exception.Message)))',
+    '}',
+    '$__beaconLines | ForEach-Object { Write-Output "BEACON64:$($_)" }',
+  ].join('\n');
+}
+
+// Inverse of withUtf8Console: rebuild clean UTF-8 stdout from the BEACON64
+// lines the wrapped script emitted. Non-matching lines (prologue noise,
+// native output outside the wrapper) are passed through as-is.
+export function decodeBeacon64Stdout(stdout: string): string {
+  const lines = stdout.split(/\r?\n/);
+  const b64 = lines.filter(l => l.startsWith('BEACON64:')).map(l => l.slice('BEACON64:'.length));
+  if (b64.length === 0) return stdout; // not a wrapped script (e.g. diag dispatched before this fix)
+  try {
+    const joined = b64.map(b => {
+      const norm = b.replace(/-/g, '+').replace(/_/g, '/');
+      const bin = atob(norm + '='.repeat((4 - (norm.length % 4 || 4)) % 4));
+      return [...new Uint8Array([...bin].map(c => c.charCodeAt(0)))];
+    }).flat();
+    return new TextDecoder('utf-8', { fatal: false, ignoreBOM: true }).decode(new Uint8Array(joined)).trimEnd();
+  } catch {
+    return stdout;
+  }
+}
+
 export async function cancelGptTask(db: Db, taskId: string, now: number): Promise<boolean> {
   const task = await db.select().from(schema.gptTasks).where(eq(schema.gptTasks.id, taskId)).get();
   if (!task || ['completed', 'failed', 'timed_out', 'cancelled', 'denied'].includes(task.status)) return false;

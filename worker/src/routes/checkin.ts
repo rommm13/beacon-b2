@@ -10,7 +10,8 @@ import { evaluatePostConditions, type PostCondition } from '../lib/postCondition
 import { isDeviceSuppressedNow } from '../lib/maintenance';
 import { isFastPollActive, FAST_POLL_INTERVAL_SECONDS } from '../lib/fastPoll';
 import { recordDiscoveredHosts, type DiscoveredHost } from '../lib/discovery';
-import { processGptTasksForDevice, mirrorGptTaskResult } from '../lib/gptBridge';
+import { processGptTasksForDevice, mirrorGptTaskResult, verifyCommandOrigin, decodeBeacon64Stdout } from '../lib/gptBridge';
+import { logActivity } from '../lib/activityLog';
 
 const checkin = new Hono<{ Bindings: Bindings }>();
 
@@ -117,8 +118,13 @@ checkin.post('/', async (c) => {
       // ChatGPT bridge: push the result into gpt_tasks immediately so the
       // model reads it within this same poll cycle rather than waiting for
       // the cron sweep. Best-effort, same posture as the dispatch hook.
+      // stdout may be BEACON64-wrapped (encoding-safe dispatch) — decode it
+      // so ChatGPT sees clean UTF-8 text.
       try {
-        await mirrorGptTaskResult(db, r.command_id, { status: r.status, result: JSON.stringify({ stdout: r.stdout, stderr: r.stderr, exit_code: r.exit_code }) }, now);
+        let decoded = { stdout: r.stdout, stderr: r.stderr, exit_code: r.exit_code };
+        if (decoded.stdout) decoded.stdout = decodeBeacon64Stdout(decoded.stdout);
+        if (decoded.stderr) decoded.stderr = decodeBeacon64Stdout(decoded.stderr);
+        await mirrorGptTaskResult(db, r.command_id, { status: r.status, result: JSON.stringify(decoded) }, now);
       } catch {
         // cron sweep will catch up
       }
@@ -299,14 +305,47 @@ checkin.post('/', async (c) => {
     return c.json<CheckInResponse>({});
   }
 
-  // Fetch queued commands and mark them sent
-  const queued = await db.select()
+  // Fetch queued commands and mark them sent. SECURITY: only commands whose
+  // payload carries a valid server origin signature (HMAC over
+  // command_id+device_id+payload with CONFIG_ENCRYPTION_KEY) are handed to
+  // the agent. Everything else — e.g. rows INSERTed directly into D1 by a
+  // compromised/over-privileged client that can write arbitrary tables — is
+  // failed here and never reaches the device. The signature cannot be forged
+  // without the worker secret; the signature field itself is inside the
+  // signed material, so tampering breaks it.
+  const queuedRows = await db.select()
     .from(schema.commands)
     .where(and(
       eq(schema.commands.deviceId, device.id),
       eq(schema.commands.status, 'queued'),
     ))
     .limit(10);
+
+  const queued = [];
+  for (const cmd of queuedRows) {
+    if (!(await verifyCommandOrigin(cmd.id, cmd.deviceId, cmd.type, cmd.payload, c.env.CONFIG_ENCRYPTION_KEY))) {
+      await db.update(schema.commands).set({
+        status: 'failed',
+        result: JSON.stringify({ stderr: '[beacon: command rejected - missing or invalid server origin signature]' }),
+        completedAt: now,
+      }).where(eq(schema.commands.id, cmd.id));
+      await logActivity(db, {
+        actorType: 'system',
+        actorId: 'origin-guard',
+        actorLabel: 'Command Origin Guard',
+        category: 'Security',
+        action: 'Unsigned command rejected',
+        entityType: 'device',
+        entityId: device.id,
+        companyId: device.companyId,
+        method: 'POST',
+        path: c.req.path,
+        details: { commandId: cmd.id, type: cmd.type },
+      });
+      continue;
+    }
+    queued.push(cmd);
+  }
 
   if (queued.length > 0) {
     await db.update(schema.commands)
